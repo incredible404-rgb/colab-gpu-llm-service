@@ -187,15 +187,18 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const op = __OP__;
 const HDR = { "Accept": "application/json", "X-Colab-Client-Agent": "colab-cli" };
 const strip = (text) => text.replace(/^\)\]\}'\s*/, '');
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ' timed out after ' + ms + ' ms')), ms))]);
 const getJson = async (path) => {
-  const r = await fetch(path, { headers: HDR, credentials: 'include' });
-  const text = await r.text();
+  const r = await withTimeout(fetch(path, { headers: HDR, credentials: 'include' }), 15000, 'GET ' + path);
+  const text = await withTimeout(r.text(), 15000, 'read ' + path);
   let data = null;
   try { data = JSON.parse(strip(text)); } catch (e) {}
   return { status: r.status, data, head: data ? '' : text.slice(0, 120) };
 };
 const snapshot = async () => {
-  const [c, a] = await Promise.all([getJson('/tun/m/ccu-info?authuser=0'), getJson('/tun/m/assignments?authuser=0')]);
+  let c, a;
+  try { [c, a] = await Promise.all([getJson('/tun/m/ccu-info?authuser=0'), getJson('/tun/m/assignments?authuser=0')]); }
+  catch (e) { return { error: 'snapshot EXCEPTION ' + String(e) }; }
   if (!c.data) return { error: 'ccu-info HTTP ' + c.status + ' ' + c.head };
   if (!a.data) return { error: 'assignments HTTP ' + a.status + ' ' + a.head };
   const list = (a.data.assignments || []).map(x => ({ endpoint: x.endpoint, accelerator: x.accelerator, variant: x.variant, machineShape: x.machineShape }));
@@ -210,18 +213,20 @@ if (before.error || op.op === 'status') return before;
 const targets = op.endpoints && op.endpoints.length ? op.endpoints : before.assignments.map(x => x.endpoint).filter(Boolean);
 const released = [];
 for (const ep of targets) {
-  const url = '/tun/m/unassign/' + encodeURIComponent(ep) + '?authuser=0';
-  const g = await getJson(url);
-  const token = g.data && g.data.token;
-  if (!token) { released.push({ endpoint: ep, ok: false, step: 'GET', status: g.status }); continue; }
-  const r = await fetch(url, { method: 'POST', credentials: 'include', headers: Object.assign({}, HDR, { 'X-Goog-Colab-Token': token }) });
-  released.push({ endpoint: ep, ok: r.ok, step: 'POST', status: r.status });
+  try {
+    const url = '/tun/m/unassign/' + encodeURIComponent(ep) + '?authuser=0';
+    const g = await getJson(url);
+    const token = g.data && g.data.token;
+    if (!token) { released.push({ endpoint: ep, ok: false, step: 'GET', status: g.status }); continue; }
+    const r = await withTimeout(fetch(url, { method: 'POST', credentials: 'include', headers: Object.assign({}, HDR, { 'X-Goog-Colab-Token': token }) }), 15000, 'POST ' + url);
+    released.push({ endpoint: ep, ok: r.ok, step: 'POST', status: r.status });
+  } catch (e) { released.push({ endpoint: ep, ok: false, step: 'EXCEPTION', status: String(e) }); }
 }
 let after = null;
 for (let i = 0; i < 3; i++) {
   await sleep(1500);
   after = await snapshot();
-  if (!after.error && after.assignmentsCount === 0 && after.consumptionRateHourly === 0) break;
+  if (!after.error && after.assignmentsCount === 0 && after.consumptionRateHourly === 0 && after.assignments.length === 0) break;
 }
 return { before, released, after };
 }"""
@@ -297,7 +302,8 @@ def format_status(snap):
 
 
 def is_clean(snap):
-    return bool(snap) and snap.get('assignmentsCount') == 0 and snap.get('consumptionRateHourly') == 0
+    return (bool(snap) and snap.get('assignmentsCount') == 0 and snap.get('consumptionRateHourly') == 0
+            and isinstance(snap.get('assignments'), list) and len(snap['assignments']) == 0)
 
 
 def _want_cells(nb_cells):
@@ -331,7 +337,9 @@ def sync_to_colab(nb, drive_id, run_cell1=False, release_runtime=False, label=No
         return report
     if release_runtime:
         import colab_meter
-        colab_meter.stop_and_report(kill_all=True)
+        rc = colab_meter.stop_and_report(kill_all=True)
+        if rc != 0:
+            raise RuntimeError('runtime release verification failed (active assignments remain)')
     verify_from_drive(drive_id, url, want, runtime)
     return report
 

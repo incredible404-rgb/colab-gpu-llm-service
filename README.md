@@ -76,11 +76,13 @@ python scripts/colab_sync.py --release-all          # kill all and verify
 **Two-track bill.**
 
 ```text
-track 1 (cloud ledger)  max(0, start_balance - end_balance)
-track 2 (wall clock)    duration_seconds / 3600 x rate_hourly
+track 1 (account ledger delta)  max(0, start_balance - end_balance)
+track 2 (wall clock)            duration_seconds / 3600 x rate_hourly
 ```
 
-The ledger can lag a few minutes behind real consumption, so a short session may show a smaller track 1. Showing both makes a stuck session obvious.
+Track 1 is an account-wide balance delta: it lags a few minutes behind real consumption, includes every instance that ran in the window, and can even rise on a top-up or refund (it is clamped to 0 and a note is printed). Track 2 is per session. Showing both makes a stuck session obvious; with concurrent instances read track 2 as the per-session figure.
+
+**Safe stop.** `colab_meter.py stop -s NAME` only releases the endpoints recorded for that session. An unknown name, or a session without bound endpoints, exits with 1 and releases nothing; use `--all` to force-release every active instance. A session recorded by `--run-cell1` while the VM was still allocating (rate 0, no endpoints) is backfilled with the real endpoint and burn rate by the next `status` or `stop`.
 
 **Sync integration.** `make_*_notebook.py --sync-colab --run-cell1` records the opening balance once cell 1 starts. `--release-runtime` also calls `unassignCurrentVm`, sweeps leftover assignments, verifies `0 active / 0.00 CU/h` and prints the bill.
 

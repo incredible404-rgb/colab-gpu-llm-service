@@ -32,6 +32,20 @@ def _arg_value(argv, flag):
     return None
 
 
+def _read_secrets(path):
+    """Parse .secrets.json: the top level must be an object and every field a non-empty string."""
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except ValueError as e:
+        raise SystemExit('%s is not valid JSON: %s' % (path.name, e))
+    if not isinstance(data, dict):
+        raise SystemExit('%s must be a JSON object at the top level, got %s' % (path.name, type(data).__name__))
+    bad = [k for k, v in data.items() if not isinstance(v, str) or not v.strip()]
+    if bad:
+        raise SystemExit('%s: fields must be non-empty strings: %s' % (path.name, ', '.join(sorted(bad))))
+    return data
+
+
 def load_config(argv=None):
     """Return (config dict, sanitized bool, output_dir Path, sources dict field -> origin)."""
     argv = sys.argv[1:] if argv is None else argv
@@ -42,7 +56,7 @@ def load_config(argv=None):
 
     stored = {}
     if not sanitized and SECRETS_FILE.exists():
-        stored = json.loads(SECRETS_FILE.read_text(encoding='utf-8'))
+        stored = _read_secrets(SECRETS_FILE)
     config, sources = {}, {}
     for field, (env_name, placeholder) in FIELDS.items():
         if sanitized:
@@ -69,10 +83,14 @@ def report(config, sanitized, sources):
               '.secrets.example.json)' % ', '.join(missing), file=sys.stderr)
 
 
-def guard_sync(sanitized, sources):
-    """Refuse to push a notebook to Colab when it holds placeholders."""
+def guard_sync(sanitized, sources, config=None):
+    """Refuse to push a notebook to Colab when it holds placeholders or empty values."""
     if '--sync-colab' not in sys.argv:
         return
-    if sanitized or any(s == 'placeholder' for s in sources.values()):
+    if sanitized or any(src == 'placeholder' for src in sources.values()):
         raise SystemExit('--sync-colab needs real values from .secrets.json / environment; refusing to push '
                          'a notebook with placeholders')
+    bad = sorted(f for f, v in (config or {}).items()
+                 if not isinstance(v, str) or not v.strip() or '<YOUR_' in v)
+    if bad:
+        raise SystemExit('--sync-colab refused: empty or <YOUR_...> placeholder value in %s' % ', '.join(bad))

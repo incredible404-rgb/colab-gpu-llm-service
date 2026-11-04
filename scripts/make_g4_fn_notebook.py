@@ -18,7 +18,7 @@ from secrets_config import guard_sync, load_config, report
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CONFIG, SANITIZED, OUTPUT_DIR, CONFIG_SOURCES = load_config()
 report(CONFIG, SANITIZED, CONFIG_SOURCES)
-guard_sync(SANITIZED, CONFIG_SOURCES)
+guard_sync(SANITIZED, CONFIG_SOURCES, CONFIG)
 LIT_NB = OUTPUT_DIR / 'qwen3.8-27b-pi-colab.ipynb'
 G4_NB = OUTPUT_DIR / 'qwen3.8-flash-next-g4-colab.ipynb'
 G4_USAGE = ROOT_DIR / 'references/qwen38-flash-next-g4.md'
@@ -833,4 +833,4 @@ nb = {
 G4_NB.write_text(json.dumps(nb, ensure_ascii=False, indent=1) + '\n', encoding='utf-8', newline='')
 print('Generated:', G4_NB)
 
-sync_requested(nb, G4_DRIVE_ID)
+sync_requested(nb, G4_DRIVE_ID, label='qwen38-fn')
