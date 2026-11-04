@@ -1,0 +1,4 @@
+.secrets.json
+.colab-meter-state.json
+__pycache__/
+*.pyc
