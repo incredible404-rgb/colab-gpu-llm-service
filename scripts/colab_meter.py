@@ -77,13 +77,12 @@ def backfill_sessions(state, snap):
 
     A session needs backfill when its rate_hourly is 0 or it has no endpoints. Endpoints are only bound when
     unambiguous: exactly one live assignment is not yet claimed by another session and exactly one session is
-    waiting for one. The rate is this session's share of the live account burn rate (the full rate for one VM).
+    waiting for one. The rate is the unclaimed portion of the live account burn rate.
     Returns True when the state changed (the caller saves it)."""
     assignments = [a for a in (snap or {}).get('assignments') or [] if a.get('endpoint')]
     if not assignments:
         return False
     live_rate = snap.get('consumptionRateHourly')
-    share = live_rate / len(assignments) if _is_num(live_rate) and live_rate > 0 else 0
     sessions = state['sessions']
     claimed = {e for s in sessions for e in s['endpoints']}
     unclaimed = [a['endpoint'] for a in assignments if a['endpoint'] not in claimed]
@@ -92,8 +91,11 @@ def backfill_sessions(state, snap):
     if len(waiting) == 1 and len(unclaimed) == 1:
         waiting[0]['endpoints'] = [unclaimed[0]]
         changed = True
-    for s in sessions:
-        if s['endpoints'] and not s['rate_hourly'] > 0 and share > 0:
+    known_rate = sum(s['rate_hourly'] for s in sessions if _is_num(s.get('rate_hourly')) and s['rate_hourly'] > 0)
+    need_rate = [s for s in sessions if s['endpoints'] and not s['rate_hourly'] > 0]
+    if need_rate and _is_num(live_rate) and live_rate > known_rate:
+        share = (live_rate - known_rate) / len(need_rate)
+        for s in need_rate:
             s['rate_hourly'] = share
             changed = True
     return changed
@@ -101,18 +103,24 @@ def backfill_sessions(state, snap):
 
 def start_meter(label, gpu=None):
     """Record the opening balance and time for a session (replaces an earlier record with the same label)."""
+    state = _load_state()
+    others = [s for s in state['sessions'] if s.get('label') != label]
+    claimed = {e for s in others for e in s['endpoints']}
+    claimed_rate = sum(s['rate_hourly'] for s in others if _is_num(s.get('rate_hourly')) and s['rate_hourly'] > 0)
     snap = colab_sync.colab_status()
+    unclaimed = [a for a in snap['assignments'] if a.get('endpoint') and a['endpoint'] not in claimed]
+    live_rate = snap['consumptionRateHourly'] if _is_num(snap.get('consumptionRateHourly')) else 0.0
+    own_rate = max(0.0, live_rate - claimed_rate) if unclaimed or not others else 0.0
     record = {
         'label': label,
-        'gpu': gpu or (snap['assignments'][0].get('variant') if snap['assignments'] else None),
+        'gpu': gpu or (unclaimed[0].get('variant') if unclaimed else None),
         'start_time': time.time(),
         'start_time_iso': datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds'),
         'start_balance': snap['currentBalance'],
-        'rate_hourly': snap['consumptionRateHourly'],
-        'endpoints': [a['endpoint'] for a in snap['assignments'] if a.get('endpoint')],
+        'rate_hourly': own_rate,
+        'endpoints': [a['endpoint'] for a in unclaimed],
     }
-    state = _load_state()
-    state['sessions'] = [s for s in state['sessions'] if s.get('label') != label] + [record]
+    state['sessions'] = others + [record]
     _save_state(state)
     print('Meter started: %s | GPU: %s | Start balance: %.2f CU | Burn rate: %.2f CU/h | %s' % (
         label, record['gpu'] or '-', record['start_balance'], record['rate_hourly'], record['start_time_iso']))
