@@ -5,7 +5,7 @@
     python scripts/colab_meter.py stop  [-s NAME] [--all]
 
 All account data comes from Colab's /tun/m endpoints through colab_sync (a signed-in Colab tab in Edge, via
-Playwriter or playwright-cli). Meter state lives in .colab-meter-state.json next to this repo's README.
+BrowserMCP, Playwriter or playwright-cli). Meter state lives in .colab-meter-state.json next to this repo's README.
 
 Two-track bill printed by `stop`:
   track 1  account ledger delta  max(0, start_balance - end_balance)  what the account balance dropped by

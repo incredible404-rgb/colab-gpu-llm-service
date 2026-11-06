@@ -18,8 +18,12 @@ FIELDS = {
     'ts_client_id': ('TS_CLIENT_ID', '<YOUR_TS_OAUTH_CLIENT_ID>'),
     'ts_client_secret': ('TS_CLIENT_SECRET', '<YOUR_TS_OAUTH_CLIENT_SECRET>'),
     'tailnet_fqdn': ('TAILNET_FQDN', 'qwen.<YOUR_TAILNET>.ts.net'),
-    'lit_drive_id': ('LIT_DRIVE_ID', '<YOUR_LIT_NOTEBOOK_DRIVE_ID>'),
+    # Tailscale IP of the Windows machine running local_novel_mcp.py (the WebUI file bridge dials it).
+    'local_tailscale_ip': ('LOCAL_TAILSCALE_IP', '<YOUR_LOCAL_TAILSCALE_IP>'),
     'g4_drive_id': ('G4_DRIVE_ID', '<YOUR_G4_NOTEBOOK_DRIVE_ID>'),
+    'qwen122b_drive_id': ('QWEN122B_DRIVE_ID', '<YOUR_QWEN122B_NOTEBOOK_DRIVE_ID>'),
+    'nemotron120b_drive_id': ('NEMOTRON120B_DRIVE_ID', '<YOUR_NEMOTRON120B_NOTEBOOK_DRIVE_ID>'),
+    'gemma31b_drive_id': ('GEMMA31B_DRIVE_ID', '<YOUR_GEMMA31B_NOTEBOOK_DRIVE_ID>'),
 }
 
 
