@@ -1,4 +1,4 @@
-"""Push generated notebook cells into a Colab tab of the signed-in Edge (Playwriter, falling back to playwright-cli -s=edge).
+"""Push generated notebook cells into a Colab tab of the signed-in Edge (BrowserMCP, then Playwriter, then playwright-cli -s=edge).
 
 Shared by make_*_notebook.py --sync-colab. The Colab tab is chosen by Drive file id: a tab on any other
 notebook is never touched. Cells are matched by type, surplus cells are deleted, texts are set and read back,
@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 from pathlib import Path
@@ -26,8 +27,11 @@ from pathlib import Path
 CLI_JS = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'npm/node_modules/@playwright/cli/playwright-cli.js'
 CLI_TIMEOUT = 120  # the bridge hangs forever when it drops, so every call needs an upper bound
 PW_HELPER = Path(__file__).with_name('colab_pw.mjs')
+BMCP_BRIDGE = Path.home() / '.config/magpie/library/skills/live-browser/scripts/browsermcp-bridge.mjs'
 _target = {}
-_backend = None  # 'playwriter' until it fails once in this process, then 'bridge'
+# Tier in use: None/'browsermcp' -> 'playwriter' -> 'bridge' (playwright-cli). A tier that fails once is skipped
+# for the rest of the process.
+_backend = None
 ANY_TAB = '__ANY__'
 ANY_URL = 'https://colab.research.google.com/'
 COLAB_TAB_RE = re.compile(r'^- (\d+): (\(current\) )?.*https://colab\.research\.google\.com(/|\s|$)', re.M)
@@ -130,8 +134,90 @@ def _result_json(proc):
     return json.loads(body)
 
 
-class _PlaywriterUnavailable(RuntimeError):
-    pass
+class _BackendUnavailable(RuntimeError):
+    """The browser tier itself failed (not the page code); the caller moves to the next tier."""
+
+
+_PlaywriterUnavailable = _BackendUnavailable
+
+# Runs inside the BrowserMCP REPL (Node side). The page function is read from a temp file because the
+# sync payload is far beyond the 32767-char Windows command line. A notebook tab this opens is kept
+# (markDeliverable) like the Playwriter path; an __ANY__ temp tab is closed by session_finish, and a claimed
+# user tab is released untouched.
+BMCP_DRIVER = r"""await (async () => {
+const fs = await import('node:fs');
+const js = fs.readFileSync(__PATH__, 'utf8');
+const driveId = __DRIVE__, url = __URL__;
+const anyTab = driveId === '__ANY__';
+const first = (e) => String(e?.message || e).split('\n')[0];
+let tab;
+try {
+  await browser.nameSession('Colab sync');
+  const found = await browser.user.openTabs({ query: anyTab ? 'colab.research.google.com' : driveId, limit: 20 });
+  const hits = found.items.filter((i) => anyTab ? /^https:\/\/colab\.research\.google\.com(\/|$)/.test(i.url) : i.url.includes(driveId));
+  if (hits.length) {
+    tab = await browser.user.claimTab({ tabId: hits[hits.length - 1].tabId });
+  } else {
+    tab = await browser.tabs.new(url);
+    if (!anyTab) await tab.markDeliverable();
+  }
+} catch (e) {
+  return { bmcpError: first(e) };
+}
+try {
+  return { result: await tab.evaluate('(' + js + ')()', { timeoutMs: __EVAL_MS__ }) };
+} catch (e) {
+  return { result: { error: 'evaluate failed', detail: first(e) } };
+}
+})()"""
+
+
+def _bmcp_eval(js, timeout=CLI_TIMEOUT, target=None):
+    target = target or _target
+    if not BMCP_BRIDGE.exists():
+        raise _BackendUnavailable('browsermcp-bridge.mjs not found')
+    fd, page_path = tempfile.mkstemp(prefix='colab-bmcp-', suffix='.js')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
+            f.write(js)
+        driver = (BMCP_DRIVER.replace('__PATH__', json.dumps(Path(page_path).as_posix()))
+                  .replace('__DRIVE__', json.dumps(target['drive_id'])).replace('__URL__', json.dumps(target['url']))
+                  .replace('__EVAL_MS__', str((timeout - 15) * 1000)))
+        try:
+            proc = subprocess.run(['node', str(BMCP_BRIDGE), '--timeout', str(timeout * 1000), '-e', driver],
+                                  capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout + 20)
+        except subprocess.TimeoutExpired:
+            raise _BackendUnavailable('no answer within %ss' % timeout)
+    finally:
+        Path(page_path).unlink(missing_ok=True)
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        out = None
+    if proc.returncode or not isinstance(out, dict) or not out.get('ok') or not isinstance(out.get('value'), dict):
+        raise _BackendUnavailable((proc.stderr or proc.stdout).strip()[-400:] or 'bridge printed nothing')
+    value = out['value']
+    if 'bmcpError' in value:
+        raise _BackendUnavailable(value['bmcpError'])
+    return value['result']
+
+
+def _tiered(js, target):
+    """Try BrowserMCP, then Playwriter. Returns (True, result) or (False, None) once both are out."""
+    global _backend
+    tiers = [('browsermcp', _bmcp_eval), ('playwriter', _pw_eval)]
+    if _backend == 'playwriter':
+        tiers = tiers[1:]
+    elif _backend == 'bridge':
+        tiers = []
+    for name, fn in tiers:
+        try:
+            result = fn(js, target=target)
+            _backend = name
+            return True, result
+        except _BackendUnavailable as e:
+            print('%s unavailable (%s); trying the next browser tier' % (name, e), file=sys.stderr)
+    return False, None
 
 
 def _pw_eval(js, timeout=CLI_TIMEOUT, target=None):
@@ -153,14 +239,11 @@ def _pw_eval(js, timeout=CLI_TIMEOUT, target=None):
 def _eval(js):
     global _backend
     if _backend != 'bridge':
-        try:
-            result = _pw_eval(js)
-            _backend = 'playwriter'
+        ok, result = _tiered(js, _target)
+        if ok:
             return result
-        except _PlaywriterUnavailable as e:
-            print('Playwriter unavailable (%s); falling back to playwright-cli -s=edge' % e, file=sys.stderr)
-            _backend = 'bridge'
-            _select_tab(_target['drive_id'], _target['url'])
+        _backend = 'bridge'
+        _select_tab(_target['drive_id'], _target['url'])
     if len(js) > 30000:
         raise RuntimeError('eval payload is %d chars; the Windows command line limit (32767) is too close' % len(js))
     return _result_json(_cli('eval', js))
@@ -238,13 +321,10 @@ def _eval_any(js):
     global _backend
     target = {'drive_id': ANY_TAB, 'url': ANY_URL}
     if _backend != 'bridge':
-        try:
-            result = _pw_eval(js, target=target)
-            _backend = 'playwriter'
+        ok, result = _tiered(js, target)
+        if ok:
             return result
-        except _PlaywriterUnavailable as e:
-            print('Playwriter unavailable (%s); falling back to playwright-cli -s=edge' % e, file=sys.stderr)
-            _backend = 'bridge'
+        _backend = 'bridge'
     return _bridge_eval_any(js)
 
 

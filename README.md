@@ -13,7 +13,7 @@ The runtime is disposable and `/content` is wiped on every new session, so every
 | In-place GPU LoRA baking | A LoRA is merged on the GPU at load time, so inference runs at base-model speed |
 | `llama.cpp` MTP speculative decoding | Draft-head speculation tuned for code and tool calls |
 | Tailscale Service (`svc:qwen`) | A fixed `qwen.<YOUR_TAILNET>.ts.net` address that survives runtime changes, with no login or manual approval |
-| Playwriter zero-OAuth CU metering | Live balance, burn rate and active sessions without OAuth or API keys |
+| Browser-tab zero-OAuth CU metering | Live balance, burn rate and active sessions without OAuth or API keys |
 | Two-track CU bill and ghost-session kill switch | Reconciles what Colab billed against what the wall clock predicts, and releases sessions whose page was already closed |
 | `.secrets.json` + `--sanitized` | Notebooks are generated from a private config; a sanitized build contains no real credential, tailnet or Drive ID |
 
@@ -22,7 +22,7 @@ The runtime is disposable and `/content` is wiped on every new session, so every
 ```text
  Local machine (signed-in Edge)                       Colab runtime (G4 96 GB, ~180 GB RAM)
  ┌─────────────────────────────┐                      ┌───────────────────────────────────────────┐
- │ make_*_notebook.py          │  Playwriter / CLI    │ cell 1: one-click start                    │
+ │ make_*_notebook.py          │  BrowserMCP / PW     │ cell 1: one-click start                    │
  │   reads .secrets.json       │ ───────────────────▶ │  1. GPU check (>= 85 GB VRAM)              │
  │   writes .ipynb             │  push cells, run     │  2. /dev/shm + /var/colab tmpfs RAM disks  │
  │ colab_sync.py               │                      │  3. 8 procs x 4 threads -> os.pwrite       │
@@ -41,11 +41,10 @@ The runtime is disposable and `/content` is wiped on every new session, so every
 2. **32 concurrent streams.** A separate downloader runs 8 processes x 4 threads, each writing with `os.pwrite` at its own offset. Separate processes avoid the single-process GIL and TLS decryption bottleneck. Signed CDN links are resolved once and reused.
 3. **`MAP_POPULATE` for the largest tensor.** The second shard is a single 26.8 GiB per-layer embedding table. It is written to `/dev/shm` first and `llama-server` maps it with `--lazy-mode off`, pre-populating the page tables. Inference then runs without page faults and without a second copy.
 4. **One-cell console.** After startup the first cell shows a ready banner with the WebUI link and a stop button that releases the GPU.
-5. **LoRA baked in place.** The 27B literary notebook merges its LoRA on the GPU, so there is no runtime slowdown.
 
 ## Speculative decoding and sampling
 
-`llama.cpp` runs `--spec-type draft-mtp` with a matching MTP draft head. The G4 notebook is tuned for code and long-horizon agent work: single 262,144-token slot, low-temperature sampling, a DRY penalty that allows legitimate short code repeats but breaks failure loops, a 16 GiB prompt cache with slot persistence, and a 65,536-token output limit. Treat the exact numbers as a starting point and re-measure with your own prompts: run one cold request and two consecutive ones, and read `predicted_per_second` and the draft acceptance rate from the server log.
+`llama.cpp` runs `--spec-type draft-mtp` with a matching MTP draft head. The G4 notebook is tuned for code and long-horizon agent work: single 262,144-token slot, each model card's recommended sampling (no extra penalties or DRY), a 16 GiB prompt cache with slot persistence, and a 65,536-token output limit. Treat the exact numbers as a starting point and re-measure with your own prompts: run one cold request and two consecutive ones, and read `predicted_per_second` and the draft acceptance rate from the server log.
 
 ## Private access with Tailscale Service
 
@@ -53,7 +52,23 @@ The runtime joins your tailnet with a one-shot, ephemeral, `tag:colab` auth key 
 
 The service is only visible inside your tailnet, so the WebUI works without pasting a key. If you ever expose it through Funnel or any public endpoint, add `--api-key-file` first.
 
-## Zero-OAuth CU metering and ghost-session kill
+## Headless start with the official Colab CLI (short jobs only)
+
+As of CLI 0.7.5 (tested 2026-11-06), a CLI-created G4 session is reclaimed about 24 minutes after creation even with the keep-alive pings below, a busy kernel, or ongoing inference. Use the notebook path for long sessions; the CLI path fits short jobs, metering and release.
+
+`scripts/colab_cli.py` drives the official [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli) (`uv tool install google-colab-cli`, authorize once with `colab sessions`). It runs the same cell-1 code as the notebooks without the frontend-only tail. No browser tab is involved.
+
+The browser and the colab-vscode extension ping `GET /tun/m/<endpoint>/keep-alive/` (header `X-Colab-Tunnel: Google`) every minute; CLI 0.7 dropped its keep-alive daemon. `start` launches `scripts/colab_keepalive.py` detached under the CLI's own interpreter: it pings every 60 s, polls `/slots` over Tailscale and runs `colab stop` after `--idle-min` (default 45) minutes without inference. If the PC sleeps, the pings stop and Colab reclaims the VM on its own.
+
+```bash
+python scripts/colab_cli.py start qwen38-fn   # G4 session -> cell 1 -> Tailscale /v1/models check -> verify cell
+python scripts/colab_cli.py status            # balance, burn rate, sessions, idle-guard state
+python scripts/colab_cli.py stop --all        # release and verify 0 active / 0 CU/h
+```
+
+CLI sessions cannot read Colab Secrets or mount Drive; the kernel downloads from pinned Hugging Face revisions and forwards a local `HF_TOKEN` when present. G4 rejects `--high-mem`, and `colab exec` times out after 30 s unless `--timeout` is passed; the script handles both.
+
+## Zero-OAuth CU metering and ghost-session kill (browser fallback)
 
 Colab's own web app talks to `/tun/m/*`. The scripts call those endpoints from inside a signed-in `colab.research.google.com` tab, so no OAuth client or API key is needed.
 
@@ -90,7 +105,7 @@ The `/tun/m` endpoints are undocumented and may change. Treat them as a convenie
 
 ## Quick start
 
-Requirements: Python 3.10+, Node.js, a signed-in Edge with the Playwriter extension (or `@playwright/cli`), a Colab Pro/Pro+ plan with G4 access, and a Tailscale tailnet with an OAuth client.
+Requirements: Python 3.10+, Node.js, a signed-in Edge with the BrowserMCP extension (Playwriter or `@playwright/cli` as fallbacks), a Colab Pro/Pro+ plan with G4 access, and a Tailscale tailnet with an OAuth client.
 
 ```bash
 git clone <this repo> && cd colab-gpu-llm-service-oss
@@ -106,9 +121,10 @@ python scripts/make_g4_fn_notebook.py --sync-colab --run-cell1
 | `api_key` | Model API key written to the runtime |
 | `ts_client_id`, `ts_client_secret` | Tailscale OAuth client used to mint ephemeral auth keys |
 | `tailnet_fqdn` | Service address, `qwen.<YOUR_TAILNET>.ts.net` |
-| `lit_drive_id`, `g4_drive_id` | Drive file IDs of the two notebooks (needed only for `--sync-colab`) |
+| `local_tailscale_ip` | Tailscale IP of the Windows machine running `local_novel_mcp.py` (WebUI file bridge) |
+| `g4_drive_id`, `qwen122b_drive_id`, `nemotron120b_drive_id`, `gemma31b_drive_id` | Drive file IDs of the notebooks (needed only for `--sync-colab`) |
 
-Each field can also come from an environment variable: `LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, `LIT_DRIVE_ID`, `G4_DRIVE_ID`. Resolution order is `.secrets.json`, then environment, then a placeholder.
+Each field can also come from an environment variable: `LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, `LOCAL_TAILSCALE_IP`, `G4_DRIVE_ID`, `QWEN122B_DRIVE_ID`, `NEMOTRON120B_DRIVE_ID`, `GEMMA31B_DRIVE_ID`. Resolution order is `.secrets.json`, then environment, then a placeholder.
 
 The checked-in notebooks under `notebooks/` are **sanitized builds** and contain placeholders only. Generate your own with the commands above.
 
@@ -125,12 +141,11 @@ python scripts/make_g4_fn_notebook.py --sanitized --output-dir dist/
 ```text
 SKILL.md                      agent-facing runbook
 scripts/
-  make_27b_lit_notebook.py    literary 27B notebook generator
   make_g4_fn_notebook.py      G4 code/agent notebook generator
   secrets_config.py           .secrets.json / env / placeholder loader
   colab_sync.py               push cells to Colab, /tun/m wrapper, --status / --release-all
   colab_meter.py              status / start / stop CLI with two-track bill
-  colab_pw.mjs                Playwriter backend (supports the __ANY__ tab mode)
+  colab_pw.mjs                Playwriter fallback backend (supports the __ANY__ tab mode)
   parallel_download.py        multi-process downloader used by the notebooks
   webui_console.py            first-cell console and stop button
   stop-runtime.py             release helper

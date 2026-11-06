@@ -90,7 +90,7 @@ Invoke-WebRequest -Uri 'https://qwen-colab.<tailnet>.ts.net/verify' -TimeoutSec 
 `Tailscale-User-Login: <本人账号>`、`X-Forwarded-For: 100.x.x.x`，说明 Serve 链路与身份头都正常。
 
 模型起来后同一地址就是 OpenAI 兼容接口：`https://<host>.<tailnet>.ts.net/v1`。
-文学 1 / 综合 1 两个笔记本自 2026-11-03 起不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（`serve status` 显示 `(tailnet only)`，未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
+各模型笔记本不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（`serve status` 显示 `(tailnet only)`，未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
 
 ## 用完清理
 
