@@ -331,6 +331,11 @@ def _ensure_session(slug: str, gpu: str):
 def cmd_launch(slug: str, gpu: str, idle_min: int):
     """new --gpu, start the TFE daemon, exec the notebook's first cell in the kernel, poll /health."""
     config = _config()
+    cell_exec_code = launch_exec_code(notebook_first_cell(slug))
+    if '<YOUR_' in cell_exec_code:
+        raise SystemExit(
+            'notebook %s contains sanitized <YOUR_...> placeholders; '
+            'generate a private build first with: python scripts/colab_kernel.py %s' % (MODELS[slug]['notebook'], slug))
     # svc:qwen publishes raw TCP :443 to llama-server. HTTPS on that name never returns 200.
     health = 'http://%s:443/health' % config['tailnet_fqdn']
     before = usage()
@@ -346,9 +351,14 @@ def cmd_launch(slug: str, gpu: str, idle_min: int):
     info['assign_done'] = time.time()
     print('[colab_cli] assign_done %.1fs epoch=%.3f wall=%s' % (assign_s, info['assign_done'], time.strftime('%Y-%m-%d %H:%M:%S')), flush=True)
     t0 = time.monotonic()
-    start_keepalive(slug, idle_min)
+    try:
+        start_keepalive(slug, idle_min)
+    except SystemExit as err:
+        print('[colab_cli] %s; releasing %s so it does not keep burning CU' % (err, slug), flush=True)
+        cmd_stop([slug])
+        raise
     t_exec = time.monotonic()
-    rc = exec_stream(slug, launch_exec_code(notebook_first_cell(slug)), timeout_s=3600)
+    rc = exec_stream(slug, cell_exec_code, timeout_s=3600)
     exec_s = time.monotonic() - t_exec
     info['exec_s'] = exec_s
     print('[colab_cli] exec_returned %.1fs rc=%s wall=%s' % (exec_s, rc, time.strftime('%Y-%m-%d %H:%M:%S')), flush=True)
@@ -409,7 +419,14 @@ def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bo
         shape = [] if gpu in ('G4', 'L4') else ['--high-mem']
         print('[colab_cli] colab new -s %s --gpu %s %s' % (slug, gpu, ' '.join(shape)), flush=True)
         print(colab('new', '-s', slug, '--gpu', gpu, *shape, timeout=900).strip(), flush=True)
-    start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
+    try:
+        start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
+    except SystemExit as err:
+        print('[colab_cli] %s' % err, flush=True)
+        if not keep_on_fail:
+            print('[colab_cli] releasing the runtime so a failed start does not keep burning CU', flush=True)
+            cmd_stop([slug])
+        raise
     t0 = time.monotonic()
     rc = exec_stream(slug, code, timeout_s=3600)
     ok = rc == 0 and remote_check(config, slug)

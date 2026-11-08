@@ -240,13 +240,26 @@ def main(argv: list[str]) -> int:
     spawn = argv[3] if len(argv) > 3 else os.environ.get('COLAB_KEEPALIVE_SPAWN', 'direct')
     cfg, state_file, log_file = _paths(session)
     cfg.mkdir(parents=True, exist_ok=True)
-    secrets = json.loads((Path(__file__).resolve().parents[1] / '.secrets.json').read_text(encoding='utf-8'))
-    slots_url = 'http://%s:443/slots' % secrets['tailnet_fqdn']
-    slots_hdr = {'Authorization': 'Bearer ' + secrets['api_key']}
 
     def log(msg: str) -> None:
         with log_file.open('a', encoding='utf-8', newline='\n') as handle:
             handle.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+
+    secrets_path = Path(__file__).resolve().parents[1] / '.secrets.json'
+    secrets = {}
+    if secrets_path.exists():
+        try:
+            secrets = json.loads(secrets_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as err:
+            log('keep_alive_stopped reason=invalid_secrets_json error=%s' % err)
+            return 1
+    fqdn = secrets.get('tailnet_fqdn') or os.environ.get('TAILNET_FQDN', '').strip()
+    api_key = secrets.get('api_key') or os.environ.get('LLAMA_API_KEY', '').strip()
+    if not fqdn or not api_key:
+        log('keep_alive_stopped reason=missing_tailnet_fqdn_or_api_key')
+        return 1
+    slots_url = 'http://%s:443/slots' % fqdn
+    slots_hdr = {'Authorization': 'Bearer ' + api_key}
 
     def save(**kw) -> None:
         payload = {'pid': os.getpid(), 'session': session, 'spawn': spawn, 'limit_min': idle_min, **kw}

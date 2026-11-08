@@ -1,6 +1,6 @@
 {"ev": "begin", "gpu": "T4", "soak_min": 42.0, "budget": 4.0, "arms": ["wl-exec", "wl-ctl"], "balance": 828.19, "pid": 2940, "t": "2026-11-07T05:32:10-0500"}
-{"ev": "new", "arm": "wl-exec", "rc": 0, "out": "[colab] Creating session 'wl-exec'...\n[colab] Session READY.", "endpoint": "gpu-t4-s-usw4a0-2ygoxg3dhc08e", "t": "2026-11-07T05:32:13-0500"}
-{"ev": "new", "arm": "wl-ctl", "rc": 0, "out": "[colab] Creating session 'wl-ctl'...\n[colab] Session READY.", "endpoint": "gpu-t4-s-usw4a0-2sdnrmz8s7vf5", "t": "2026-11-07T05:32:17-0500"}
+{"ev": "new", "arm": "wl-exec", "rc": 0, "out": "[colab] Creating session 'wl-exec'...\n[colab] Session READY.", "endpoint": "<endpoint>", "t": "2026-11-07T05:32:13-0500"}
+{"ev": "new", "arm": "wl-ctl", "rc": 0, "out": "[colab] Creating session 'wl-ctl'...\n[colab] Session READY.", "endpoint": "<endpoint>", "t": "2026-11-07T05:32:17-0500"}
 {"ev": "beat", "rc": 0, "dt": 2.9, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:32:20-0500"}
 {"ev": "status", "min": 0, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:32:20-0500"}
 {"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:32:48-0500"}
@@ -131,5 +131,5 @@
 {"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:13:48-0500"}
 {"ev": "summary", "lived": {"wl-exec": 42.06, "wl-ctl": 21.03}, "gone": ["wl-ctl"], "t": "2026-11-07T06:14:17-0500"}
 {"ev": "stop", "arm": "wl-exec", "rc": 0, "out": "[colab] Stopping session 'wl-exec'...\n[colab] Session terminated.", "reason": "soak_end", "t": "2026-11-07T06:14:18-0500"}
-{"ev": "stop", "arm": "wl-ctl", "rc": 1, "out": "─────────────────────────────────────────────────────────────┘\nColabRequestError: Failed to issue request GET \nhttps://colab.research.google.com/tun/m/unassign/gpu-t4-s-usw4a0-2sdnrmz8s7vf5:\nNot Found", "reason": "soak_end", "t": "2026-11-07T06:14:19-0500"}
+{"ev": "stop", "arm": "wl-ctl", "rc": 1, "out": "─────────────────────────────────────────────────────────────┘\nColabRequestError: Failed to issue request GET \nhttps://colab.research.google.com/tun/m/unassign/<endpoint>:\nNot Found", "reason": "soak_end", "t": "2026-11-07T06:14:19-0500"}
 {"ev": "final", "left": 0, "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 0}, "balance": 827.08, "t": "2026-11-07T06:14:20-0500"}

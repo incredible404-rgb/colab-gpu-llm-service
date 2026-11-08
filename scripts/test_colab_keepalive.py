@@ -1,8 +1,11 @@
 """Unit tests for TFE keep-alive classification, idle detection, and launch detach."""
 import ast
 import inspect
+import json
 import subprocess
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import requests
 
@@ -145,6 +148,28 @@ class LaunchDetachTests(unittest.TestCase):
             colab_cli.stop_targets(['qwen38-fn-nl'], [], ['other'], ['ghost']),
             ['qwen38-fn-nl'])
         self.assertEqual(ka.schtasks_task_name('qwen38-fn-nl'), colab_cli.keepalive_task_name('qwen38-fn-nl'))
+
+    def test_cmd_launch_rejects_sanitized_placeholders_before_allocating(self):
+        ensured = []
+        with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'qwen.ts.net', 'api_key': 'k'}), \
+             mock.patch.object(colab_cli, 'notebook_first_cell', return_value='KEY = "<YOUR_LLAMA_API_KEY>"\n'), \
+             mock.patch.object(colab_cli, '_ensure_session', side_effect=lambda *a: ensured.append(a)):
+            with self.assertRaises(SystemExit) as ctx:
+                colab_cli.cmd_launch('qwen38-fn', 'G4', 45)
+            self.assertIn('placeholders', str(ctx.exception))
+        self.assertEqual(ensured, [])
+
+    def test_cmd_start_releases_vm_when_keepalive_fails(self):
+        stopped = []
+        with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'qwen.ts.net', 'api_key': 'k'}), \
+             mock.patch.object(colab_cli, 'headless_setup', return_value='print(1)\n'), \
+             mock.patch.object(colab_cli, 'usage', return_value={'balance': 100.0, 'rate': 0.0, 'active': 0}), \
+             mock.patch.object(colab_cli, 'sessions', return_value=['qwen38-fn']), \
+             mock.patch.object(colab_cli, 'start_keepalive', side_effect=SystemExit('daemon failed')), \
+             mock.patch.object(colab_cli, 'cmd_stop', side_effect=lambda names: stopped.append(names)):
+            with self.assertRaises(SystemExit):
+                colab_cli.cmd_start('qwen38-fn', 'G4', 45, False, False)
+        self.assertEqual(stopped, [['qwen38-fn']])
 
 
 if __name__ == '__main__':
