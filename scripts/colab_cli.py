@@ -12,11 +12,12 @@ launch reads that same cell from notebooks/<model>.ipynb (it does not rebuild it
 the kernel with LAUNCH_DETACHED=1, and polls http://<tailnet>:443/health until 200.
 The Tailscale service is raw TCP to llama-server, so HTTPS on that name never completes.
 
-Liveness: google-colab-cli 0.7.5 does not start a keep-alive daemon, and a busy kernel does not
-refresh a CLI G4. start/launch therefore start colab_keepalive.py outside this shell: every 60 s it
-GETs /tun/m/<endpoint>/keep-alive/ with X-Colab-Tunnel: Google, and runs `colab stop` after
---idle-min minutes without llama-server traffic. If this PC sleeps, pings stop and Colab reclaims
-the VM by itself.
+Liveness: google-colab-cli 0.7.5 does not start a keep-alive daemon; a CLI runtime is pruned
+21-35 min after creation unless the kernel sees fresh executions. start/launch therefore start
+colab_keepalive.py outside this shell: every 30 s it runs a one-line `colab exec` (the kernel
+heartbeat that keeps the VM), every 60 s it also GETs /tun/m/<endpoint>/keep-alive/, and it runs
+`colab stop` after --idle-min minutes without llama-server traffic. If this PC sleeps, the
+heartbeat stops and Colab reclaims the VM by itself within ~20 min.
 
 Why background processes die: a shell `&` or subprocess.Popen without start_new_session is in
 the kernel's process group and is reaped when the cell is interrupted or that shell exits.
@@ -408,7 +409,7 @@ def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bo
         shape = [] if gpu in ('G4', 'L4') else ['--high-mem']
         print('[colab_cli] colab new -s %s --gpu %s %s' % (slug, gpu, ' '.join(shape)), flush=True)
         print(colab('new', '-s', slug, '--gpu', gpu, *shape, timeout=900).strip(), flush=True)
-    start_keepalive(slug, idle_min)  # before the long download: without pings G4 is reclaimed in ~20 min
+    start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
     t0 = time.monotonic()
     rc = exec_stream(slug, code, timeout_s=3600)
     ok = rc == 0 and remote_check(config, slug)

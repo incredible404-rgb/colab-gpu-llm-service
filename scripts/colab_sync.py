@@ -80,7 +80,10 @@ for (let i = 0; i < 40 && model.isBackingFileDirty(); i++) await sleep(500);
 let released = false;
 let ran = false;
 if (__RUN_CELL1__) {
-  const runBtn = document.querySelectorAll("colab-run-button")[0];
+  // Markdown cells carry a run button too, and running a heading cell runs its whole section (every cell,
+  // including hot-switch). Target the first code cell's own button by id, never the page's first button.
+  const first = nb.cells.find(c => c.getType() === 'code');
+  const runBtn = first && document.querySelector('#cell-' + CSS.escape(first.getId()) + ' colab-run-button');
   const inner = runBtn?.shadowRoot?.querySelector("button") || runBtn?.querySelector("button");
   if (inner) { inner.click(); ran = true; }
 } else if (__RELEASE__ && nb.kernel?.isConnected?.()) {

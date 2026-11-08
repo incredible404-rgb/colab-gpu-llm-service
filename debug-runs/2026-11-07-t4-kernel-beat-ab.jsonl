@@ -1,0 +1,135 @@
+{"ev": "begin", "gpu": "T4", "soak_min": 42.0, "budget": 4.0, "arms": ["wl-exec", "wl-ctl"], "balance": 828.19, "pid": 2940, "t": "2026-11-07T05:32:10-0500"}
+{"ev": "new", "arm": "wl-exec", "rc": 0, "out": "[colab] Creating session 'wl-exec'...\n[colab] Session READY.", "endpoint": "gpu-t4-s-usw4a0-2ygoxg3dhc08e", "t": "2026-11-07T05:32:13-0500"}
+{"ev": "new", "arm": "wl-ctl", "rc": 0, "out": "[colab] Creating session 'wl-ctl'...\n[colab] Session READY.", "endpoint": "gpu-t4-s-usw4a0-2sdnrmz8s7vf5", "t": "2026-11-07T05:32:17-0500"}
+{"ev": "beat", "rc": 0, "dt": 2.9, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:32:20-0500"}
+{"ev": "status", "min": 0, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:32:20-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:32:48-0500"}
+{"ev": "status", "min": 0, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:32:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:33:18-0500"}
+{"ev": "status", "min": 1, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:33:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:33:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:34:18-0500"}
+{"ev": "status", "min": 2, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:34:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:34:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:35:18-0500"}
+{"ev": "status", "min": 3, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:35:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:35:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 8.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:36:25-0500"}
+{"ev": "status", "min": 4, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:36:25-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:36:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:37:18-0500"}
+{"ev": "status", "min": 5, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:37:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:37:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:38:18-0500"}
+{"ev": "status", "min": 6, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:38:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:38:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:39:18-0500"}
+{"ev": "status", "min": 7, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:39:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:39:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:40:18-0500"}
+{"ev": "status", "min": 8, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:40:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:40:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:41:18-0500"}
+{"ev": "status", "min": 9, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:41:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:41:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 13.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:42:30-0500"}
+{"ev": "status", "min": 10, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:42:30-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:42:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 2.1, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:43:19-0500"}
+{"ev": "status", "min": 11, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:43:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:43:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:44:18-0500"}
+{"ev": "status", "min": 12, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:44:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:44:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:45:18-0500"}
+{"ev": "status", "min": 13, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:45:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:45:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:46:18-0500"}
+{"ev": "status", "min": 14, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:46:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:46:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.8, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:47:18-0500"}
+{"ev": "status", "min": 15, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:47:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:47:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 6.0, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:48:23-0500"}
+{"ev": "status", "min": 16, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:48:23-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:48:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:49:18-0500"}
+{"ev": "status", "min": 17, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:49:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:49:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:50:18-0500"}
+{"ev": "status", "min": 18, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:50:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:50:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:51:18-0500"}
+{"ev": "status", "min": 19, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:51:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:51:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:52:18-0500"}
+{"ev": "status", "min": 20, "alive": ["wl-exec", "wl-ctl"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 2}, "t": "2026-11-07T05:52:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.8, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:52:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.7, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:53:18-0500"}
+{"ev": "GONE", "arm": "wl-ctl", "lived_min": 21.03, "t": "2026-11-07T05:53:19-0500"}
+{"ev": "status", "min": 21, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:53:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:53:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:54:18-0500"}
+{"ev": "status", "min": 22, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:54:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.7, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:54:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:55:18-0500"}
+{"ev": "status", "min": 23, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:55:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:55:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:56:18-0500"}
+{"ev": "status", "min": 24, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:56:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:56:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:57:18-0500"}
+{"ev": "status", "min": 25, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:57:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.7, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:57:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.7, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:58:18-0500"}
+{"ev": "status", "min": 26, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:58:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:58:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:59:18-0500"}
+{"ev": "status", "min": 27, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T05:59:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T05:59:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:00:18-0500"}
+{"ev": "status", "min": 28, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:00:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:00:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:01:18-0500"}
+{"ev": "status", "min": 29, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:01:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:01:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:02:18-0500"}
+{"ev": "status", "min": 30, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:02:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.7, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:02:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.9, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:03:19-0500"}
+{"ev": "status", "min": 31, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:03:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:03:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:04:18-0500"}
+{"ev": "status", "min": 32, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:04:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:04:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:05:18-0500"}
+{"ev": "status", "min": 33, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:05:19-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:05:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:06:18-0500"}
+{"ev": "status", "min": 34, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:06:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:06:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:07:18-0500"}
+{"ev": "status", "min": 35, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:07:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.5, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:07:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:08:18-0500"}
+{"ev": "status", "min": 36, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:08:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:08:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:09:18-0500"}
+{"ev": "status", "min": 37, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:09:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:09:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:10:18-0500"}
+{"ev": "status", "min": 38, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:10:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.2, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:10:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:11:18-0500"}
+{"ev": "status", "min": 39, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:11:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 5.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:11:52-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:12:18-0500"}
+{"ev": "status", "min": 40, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:12:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.3, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:12:48-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.4, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:13:18-0500"}
+{"ev": "status", "min": 41, "alive": ["wl-exec"], "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 1}, "t": "2026-11-07T06:13:18-0500"}
+{"ev": "beat", "rc": 0, "dt": 1.6, "out": "Tesla T4, 0 %, 0 MiB", "t": "2026-11-07T06:13:48-0500"}
+{"ev": "summary", "lived": {"wl-exec": 42.06, "wl-ctl": 21.03}, "gone": ["wl-ctl"], "t": "2026-11-07T06:14:17-0500"}
+{"ev": "stop", "arm": "wl-exec", "rc": 0, "out": "[colab] Stopping session 'wl-exec'...\n[colab] Session terminated.", "reason": "soak_end", "t": "2026-11-07T06:14:18-0500"}
+{"ev": "stop", "arm": "wl-ctl", "rc": 1, "out": "─────────────────────────────────────────────────────────────┘\nColabRequestError: Failed to issue request GET \nhttps://colab.research.google.com/tun/m/unassign/gpu-t4-s-usw4a0-2sdnrmz8s7vf5:\nNot Found", "reason": "soak_end", "t": "2026-11-07T06:14:19-0500"}
+{"ev": "final", "left": 0, "ccu": {"compute_units_balance": null, "hourly_consumption_rate": null, "assignments_count": 0}, "balance": 827.08, "t": "2026-11-07T06:14:20-0500"}

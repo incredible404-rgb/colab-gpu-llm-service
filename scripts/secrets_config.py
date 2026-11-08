@@ -21,9 +21,7 @@ FIELDS = {
     # Tailscale IP of the Windows machine running local_novel_mcp.py (the WebUI file bridge dials it).
     'local_tailscale_ip': ('LOCAL_TAILSCALE_IP', '<YOUR_LOCAL_TAILSCALE_IP>'),
     'g4_drive_id': ('G4_DRIVE_ID', '<YOUR_G4_NOTEBOOK_DRIVE_ID>'),
-    'qwen122b_drive_id': ('QWEN122B_DRIVE_ID', '<YOUR_QWEN122B_NOTEBOOK_DRIVE_ID>'),
-    'nemotron120b_drive_id': ('NEMOTRON120B_DRIVE_ID', '<YOUR_NEMOTRON120B_NOTEBOOK_DRIVE_ID>'),
-    'gemma31b_drive_id': ('GEMMA31B_DRIVE_ID', '<YOUR_GEMMA31B_NOTEBOOK_DRIVE_ID>'),
+    'g4nl_drive_id': ('G4NL_DRIVE_ID', '<YOUR_G4NL_NOTEBOOK_DRIVE_ID>'),
 }
 
 

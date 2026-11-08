@@ -51,12 +51,37 @@ class IdleTests(unittest.TestCase):
             [{'is_processing': False, 'n_past': 10, 'last_request_time': '2026-11-06T12:00:00Z'}], fp)[0])
 
 
+class KernelBeatTests(unittest.TestCase):
+    def test_beat_is_a_short_colab_exec(self):
+        self.assertEqual(ka.beat_argv('s', 'b.py'), ['colab', 'exec', '-s', 's', '-f', 'b.py', '--timeout', '60'])
+        ast.parse(ka.BEAT_CODE)
+        self.assertLessEqual(ka.BEAT_INTERVAL_S, 30)
+        self.assertEqual(ka.PING_INTERVAL_S % ka.BEAT_INTERVAL_S, 0)
+
+    def test_kernel_beat_results(self):
+        real = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a[0], 0, b'', b'')
+            self.assertEqual(ka.kernel_beat('s', 'b.py'), (True, 'rc0'))
+            subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a[0], 1, b'', b'Session not found')
+            ok, detail = ka.kernel_beat('s', 'b.py')
+            self.assertFalse(ok)
+            self.assertIn('Session not found', detail)
+
+            def boom(*a, **k):
+                raise subprocess.TimeoutExpired(a[0], 1)
+            subprocess.run = boom
+            self.assertEqual(ka.kernel_beat('s', 'b.py'), (False, 'timeout'))
+        finally:
+            subprocess.run = real
+
+
 class LaunchDetachTests(unittest.TestCase):
     def test_breakaway_flag_and_argv(self):
         self.assertEqual(colab_cli.CREATE_BREAKAWAY_FROM_JOB, 0x01000000)
-        argv = colab_cli.keepalive_argv('qwen35-122b', 45, 'breakaway')
+        argv = colab_cli.keepalive_argv('qwen38-fn-nl', 45, 'breakaway')
         self.assertTrue(argv[0].lower().endswith('pythonw.exe'))
-        self.assertEqual(argv[-3:], ['qwen35-122b', '45', 'breakaway'])
+        self.assertEqual(argv[-3:], ['qwen38-fn-nl', '45', 'breakaway'])
 
     def test_schtasks_command_fits_tr_limit(self):
         tr = subprocess.list2cmdline(colab_cli.keepalive_argv('ka-cpu-test', 45, 'schtasks'))
@@ -72,14 +97,14 @@ class LaunchDetachTests(unittest.TestCase):
         self.assertNotIn('python -u', code)
 
     def test_notebook_first_cell_is_the_setup_cell(self):
-        cell = colab_cli.notebook_first_cell('qwen35-122b')
+        cell = colab_cli.notebook_first_cell('qwen38-fn-nl')
         self.assertIn('start_new_session=True', cell)
         self.assertIn('DEBUG_VERIFY = False', cell)
         self.assertNotIn('display(HTML', cell)
         self.assertNotIn('qwenOpenWebui', cell)
 
     def test_detached_spawn_skips_health_wait(self):
-        cell = colab_cli.notebook_first_cell('qwen35-122b')
+        cell = colab_cli.notebook_first_cell('qwen38-fn-nl')
         tree = ast.parse(cell)
         spawn = None
         for node in ast.walk(tree):
@@ -109,17 +134,17 @@ class LaunchDetachTests(unittest.TestCase):
     def test_stop_all_includes_orphan_keepalive_tasks(self):
         text = (
             '"TaskName","Next Run Time","Status"\n'
-            '"\\ColabKeepalive-qwen35-122b","2026/11/6 23:59:00","Ready"\n'
+            '"\\ColabKeepalive-qwen38-fn-nl","2026/11/6 23:59:00","Ready"\n'
             '"\\Microsoft\\Windows\\Foo","N/A","Ready"\n'
         )
-        self.assertEqual(colab_cli.keepalive_sessions_in_schtasks_query(text), ['qwen35-122b'])
+        self.assertEqual(colab_cli.keepalive_sessions_in_schtasks_query(text), ['qwen38-fn-nl'])
         self.assertEqual(
-            colab_cli.stop_targets([], ['qwen35-122b'], ['qwen35-122b', 'ka-cpu-test'], ['ghost']),
-            ['qwen35-122b', 'ka-cpu-test', 'ghost'])
+            colab_cli.stop_targets([], ['qwen38-fn-nl'], ['qwen38-fn-nl', 'ka-cpu-test'], ['ghost']),
+            ['qwen38-fn-nl', 'ka-cpu-test', 'ghost'])
         self.assertEqual(
-            colab_cli.stop_targets(['qwen35-122b'], [], ['other'], ['ghost']),
-            ['qwen35-122b'])
-        self.assertEqual(ka.schtasks_task_name('qwen35-122b'), colab_cli.keepalive_task_name('qwen35-122b'))
+            colab_cli.stop_targets(['qwen38-fn-nl'], [], ['other'], ['ghost']),
+            ['qwen38-fn-nl'])
+        self.assertEqual(ka.schtasks_task_name('qwen38-fn-nl'), colab_cli.keepalive_task_name('qwen38-fn-nl'))
 
 
 if __name__ == '__main__':

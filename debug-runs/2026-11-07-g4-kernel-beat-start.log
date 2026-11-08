@@ -1,0 +1,21 @@
+[colab_cli] balance 827.08 CU, 0 active
+[colab_cli] colab new -s qwen38-fn --gpu G4 
+[colab] Creating session 'qwen38-fn'...
+[colab] Session READY.
+[colab_cli] keep-alive started via breakaway (pid 15440, stop after 36 idle min)
+检测到 GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition (95.6 GiB VRAM)
+[并行任务] 下载并解压 llama.cpp b12032 (CUDA 12.8) ...
+待并发下载: 91.64 GiB (8 个文件) → DDR5 内存盘 tmpfs: 77.6 GiB | 本地磁盘: 14.0 GiB
+[并行任务] Tailscale Service (qwen.<YOUR_TAILNET>.ts.net) 与本机小说文件 MCP 隧道已就绪
+[并行任务] llama.cpp b12032 就绪
+全部权重下载完成：用时 89.7s，平均 1047 MB/s
+加载 Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS 到 GPU ...
+生产模式：预热、释放内存盘副本、Tailscale 在后台收尾，不挡住下面的就绪横幅。
+================================================================
+总启动耗时： 109.1s
+网页版：     http://qwen.<YOUR_TAILNET>.ts.net:443/
+接口：       http://qwen.<YOUR_TAILNET>.ts.net:443/v1
+模型名：     Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS
+================================================================
+[colab_cli] Tailscale http://qwen.<YOUR_TAILNET>.ts.net:443/v1/models -> ['Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS']
+[colab_cli] start OK in 111s | balance 827.08 CU | rate 10.05 CU/h

@@ -1,4 +1,4 @@
-"""TFE keep-alive + idle guard for one Colab CLI session.
+"""Kernel heartbeat + TFE keep-alive + idle guard for one Colab CLI session.
 
 Started detached by colab_cli.py (Windows: pythonw + DETACHED_PROCESS |
 CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB, or a one-shot schtasks
@@ -7,8 +7,14 @@ task if the parent job forbids breakaway):
   <uv-tool>/Scripts/pythonw.exe colab_keepalive.py <session> <idle_min> [spawn]
 
 Why: google-colab-cli 0.7.5 starts no keep-alive daemon (`colab new` only
-assigns). A CLI G4 is idle-pruned about 24 minutes after creation unless some
-client pings the Tunnel Frontend the way the browser and colab-vscode do:
+assigns), and a CLI runtime (T4 and G4 alike) is pruned 21-35 minutes after
+creation. What keeps it: a short kernel execution every 30 s (`colab exec`,
+the pattern Wakeloom's local mode uses). The TFE ping and llama-server
+traffic alone do not; neither does one long-running cell. A 2026-11-07 T4
+A/B: control pruned at 21 min, the 30 s exec arm lived the full soak. The old
+RuntimeService KeepAliveAssignment RPC now answers 403 USER_PROJECT_DENIED.
+
+The TFE ping is kept (cheap, harmless) the way the browser and colab-vscode do:
 
   GET https://colab.research.google.com/tun/m/<endpoint>/keep-alive/
   header X-Colab-Tunnel: Google
@@ -40,6 +46,11 @@ import requests
 
 FOUR_XX_LIMIT = 2
 PING_INTERVAL_S = 60
+BEAT_INTERVAL_S = 30
+BEAT_TIMEOUT_S = 60
+BEAT_FAIL_LOG_EVERY = 10
+BEAT_CODE = "open('/content/.keepalive_beat', 'w').write(str(__import__('time').time()))\n"
+CREATE_NO_WINDOW = 0x08000000
 MAX_HOURS = 24
 PING_TIMEOUT_S = 10
 SLOT_TOKEN_KEYS = ('n_past', 'n_decoded', 'n_prompt_tokens')
@@ -189,6 +200,24 @@ def ping_endpoint(client, endpoint, ColabRequestError, get_status_code) -> tuple
     return classify_ping(response.status_code, None), 'http_%s' % response.status_code
 
 
+def beat_argv(session: str, path: str) -> list[str]:
+    return ['colab', 'exec', '-s', session, '-f', path, '--timeout', str(BEAT_TIMEOUT_S)]
+
+
+def kernel_beat(session: str, path: str) -> tuple:
+    """One short kernel execution. Returns (ok, detail). No console window from pythonw."""
+    try:
+        r = subprocess.run(beat_argv(session, path), capture_output=True, timeout=BEAT_TIMEOUT_S + 30,
+                           creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                           env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    except subprocess.TimeoutExpired:
+        return False, 'timeout'
+    if r.returncode == 0:
+        return True, 'rc0'
+    tail = (r.stdout or b'') + (r.stderr or b'')
+    return False, 'rc%d %s' % (r.returncode, tail.decode('utf-8', 'replace').strip()[-160:])
+
+
 def refresh_endpoint(state, session, current, apply_proxy):
     """Re-read assignments. Return the endpoint to ping, or None if this session is gone."""
     assignments = state.client.list_assignments()
@@ -244,10 +273,28 @@ def main(argv: list[str]) -> int:
     prev_fp = None
     errors = 0
     pings = 0
+    beats = beat_fails = 0
+    last_ping = None
+    beat_file = cfg / ('keepalive-%s-beat.py' % session)
+    beat_file.write_text(BEAT_CODE, encoding='utf-8', newline='\n')
     exit_reason = 'loop_ended'
     try:
         while True:
             cycle_start = time.monotonic()
+            ok, detail = kernel_beat(session, str(beat_file))
+            beats += 1
+            if ok:
+                if beat_fails:
+                    log('kernel_beat recovered n=%d after %d failures' % (beats, beat_fails))
+                beat_fails = 0
+            else:
+                beat_fails += 1
+                if beat_fails == 1 or beat_fails % BEAT_FAIL_LOG_EVERY == 0:
+                    log('kernel_beat_error n=%d consecutive=%d detail=%s' % (beats, beat_fails, detail))
+            if last_ping is not None and cycle_start - last_ping < PING_INTERVAL_S - 1:
+                time.sleep(max(0.0, BEAT_INTERVAL_S - (time.monotonic() - cycle_start)))
+                continue
+            last_ping = cycle_start
             try:
                 refresh_oauth(state.client, log)
                 refreshed = refresh_endpoint(state, session, endpoint, apply_proxy)
@@ -266,7 +313,8 @@ def main(argv: list[str]) -> int:
             pings += 1
             if kind == 'ok':
                 errors = 0
-                log('keep_alive_ping n=%d result=%s endpoint=%s' % (pings, detail, endpoint))
+                log('keep_alive_ping n=%d result=%s beats=%d beat_fails=%d endpoint=%s' % (
+                    pings, detail, beats, beat_fails, endpoint))
             elif kind == 'http_4xx':
                 errors += 1
                 log('keep_alive_error n=%d consecutive_4xx=%d result=%s endpoint=%s' % (
@@ -295,7 +343,7 @@ def main(argv: list[str]) -> int:
                 idle = 0.0
             save(endpoint=endpoint, time=time.strftime('%Y-%m-%d %H:%M:%S'), pings=pings,
                  last_result=detail, consecutive_4xx=errors, idle_min=round(idle, 1),
-                 busy=busy, server_seen=server_seen)
+                 busy=busy, server_seen=server_seen, beats=beats, beat_fails=beat_fails)
             if server_seen and idle >= idle_min:
                 exit_reason = 'idle'
                 log('keep_alive_stopped reason=idle idle_min=%.0f' % idle)
@@ -311,11 +359,12 @@ def main(argv: list[str]) -> int:
                 log('keep_alive_stopped reason=max_hours')
                 _stop_session(session, log)
                 break
-            time.sleep(max(0.0, PING_INTERVAL_S - (time.monotonic() - cycle_start)))
+            time.sleep(max(0.0, BEAT_INTERVAL_S - (time.monotonic() - cycle_start)))
     except Exception as err:
         log('crashed: %r' % err)
         raise
     finally:
+        beat_file.unlink(missing_ok=True)
         if spawn == 'schtasks':
             delete_schtask(session)
         if exit_reason != 'starting':

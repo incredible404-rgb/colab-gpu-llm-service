@@ -24,26 +24,42 @@ description: 在 Google Colab 付费 GPU 上持久化并运行 GGUF 大模型，
 
 完成条件：Drive 中存在主权重、配套 draft/MTP 文件、`llama-server`、CUDA 库和 manifest；每项的大小与记录一致。
 
-## 3. 启动与预热
+## 3. 启动与预热（同核双轨：CLI 主力 + 网页版备用）
 
-### 官方 Colab CLI：只适合 20 分钟内的短任务、查账与释放
+两套方案共用 `scripts/colab_kernel.py` 生成的同一份首格代码与 `.secrets.json` 配置，按场景选择：
 
-**长时间用模型仍走浏览器笔记本。** CLI 创建的 G4 会话在创建后约 24 分钟被 Colab 回收（2026-11-06 用 CLI 0.7.5 实测三次，三种保活都无效：每 10 分钟推理请求、内核持续执行阻塞单元、每 60 秒 `GET /tun/m/<endpoint>/keep-alive/`（`X-Colab-Tunnel: Google`，22 次 0 错误））。CPU 运行时闲 28 分钟仍在，不能拿 CPU 推 G4。CLI 升级后先用 `start` 测一次能否活过 30 分钟，过了再把它改回日常入口。
+| 轨道 | 角色 | 启动 / 查账 / 释放命令 | 适用场景 |
+|---|---|---|---|
+| **Track A · 官方 Colab CLI + 30s 内核心跳** | **主力（日常默认）** | `python scripts/colab_cli.py start qwen38-fn`（或 `launch`） / `status` / `stop --all` | 日常启动 `qwen38-fn` 或 `qwen38-fn-nl`，无需开浏览器标签页；45 分钟无推理自动停机 |
+| **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | **备用与兜底** | `python scripts/make_g4_fn_notebook.py --sync-colab --run-cell1`；`colab_meter.py status / stop --all`；`colab_sync.py --release-all` | ① 需要网页首格按钮（开关破限 LoRA、停机）或第 2 格**免释放热切换模型**；② 跑已归档笔记本（122B / Nemotron / Gemma4）；③ CLI OAuth 未授权/过期时免 OAuth 直用已登录 Edge；④ 强杀 CLI 无法按名停止的 `[?]` 幽灵实例（`colab_cli.py stop --all` 会自动回调它兜底） |
 
-统一内核登记的 4 个 G4 模型（`qwen38-fn`、`qwen35-122b`、`nemotron-120b`、`gemma4-31b`）用 [`scripts/colab_cli.py`](scripts/colab_cli.py) 一条命令起停，背后是 Google 官方 `google-colab-cli`（`uv tool install google-colab-cli`，`colab.exe`）：
+### 主力方案：官方 Colab CLI + 30 秒内核心跳保活
+
+CLI 0.7.5 创建的运行时（T4、G4 都一样）若没有新的内核执行，会在创建后 21～35 分钟被 Colab 回收。持续推理、一个长时间阻塞的单元、每 60 秒的 TFE `/tun/m/<endpoint>/keep-alive/` 都挡不住；老 CLI 的 `RuntimeService/KeepAliveAssignment` RPC 现在返回 403 USER_PROJECT_DENIED。**能保活的是每 30 秒执行一次的一行短代码**（`colab exec`，即 Wakeloom 本地模式的做法），由 `colab_keepalive.py` 负责。2026-11-07 实测：T4 对照组 21.0 分钟被回收，心跳组活满 42 分钟；G4 跑 `qwen38-fn` 活过 39 分钟，最后由空闲守护停机，不是被回收（证据见 `debug-runs/2026-11-07-*kernel-beat*`）。超过 1 小时的会话还没有实测；要长时间用时，第一次留意 `status` 的心跳计数。
+
+内核登记的 2 个 3.8fn 量化（`qwen38-fn`、`qwen38-fn-nl`）用 [`scripts/colab_cli.py`](scripts/colab_cli.py) 一条命令起停，背后是 Google 官方 `google-colab-cli`（`uv tool install google-colab-cli`，`colab.exe`）：
 
 ```bash
-python scripts/colab_cli.py start qwen38-fn   # 开 G4 → 跑首格同一份代码 → Tailscale 验 /v1/models → 全链路验收
-python scripts/colab_cli.py status            # 余额 / 燃烧率 / 会话 / 空闲守护状态
-python scripts/colab_cli.py stop --all        # 释放并核验 0 active / 0 CU/h
+python scripts/colab_cli.py start  qwen38-fn  # 开 G4 → 跑首格同一份代码 → Tailscale 验 /v1/models → 全链路验收
+python scripts/colab_cli.py launch qwen38-fn  # LAUNCH_DETACHED=1 后台脱离拉起 → 轮询 /health
+python scripts/colab_cli.py status            # 余额 / 燃烧率 / 会话 / 心跳与空闲守护状态
+python scripts/colab_cli.py stop   --all      # 释放并核验 0 active / 0 CU/h（遇 [?] 自动回调 colab_sync 强杀）
 ```
 
 - 它复用 `build_notebook_dict` 生成的首格代码，只切掉需要前端的尾巴（横幅、弹 WebUI、停机按钮）。
-- `start` 会用 CLI 自己的解释器后台起 [`scripts/colab_keepalive.py`](scripts/colab_keepalive.py)：每 60 秒 ping 一次、经 Tailscale 查 `/slots`，连续 `--idle-min`（默认 45）分钟无推理就 `colab stop`；状态与日志在 `~/.config/colab-cli/keepalive-<slug>.json|.log`。电脑睡眠或关机时 ping 停了，Colab 20 多分钟后自己回收，忘关也烧不了多久。
+- `start` / `launch` 会用 CLI 自己的解释器后台起 [`scripts/colab_keepalive.py`](scripts/colab_keepalive.py)：每 30 秒做一次内核心跳，每 60 秒做一次 TFE ping，并经 Tailscale 查 `/slots`，连续 `--idle-min`（默认 45）分钟无推理就 `colab stop`（2026-11-07 G4 实测已按时触发）；状态与日志在 `~/.config/colab-cli/keepalive-<slug>.json|.log`（`beats`/`beat_fails` 计数）。启动格执行期间出现一两次 `kernel_beat_error ... timeout` 属正常，那是心跳在排队。电脑睡眠或关机时心跳停了，Colab 20 多分钟后自己回收，忘关也烧不了多久。
 - `status` 显示「NO keep-alive running」就是守护进程不在：再跑一次 `start <slug>`（已有会话会复用，首格对健康服务是空操作）或直接 `stop`。
 - 首次要授权一次：跑 `colab sessions`，打开它打印的 Google 链接点「允许」，把授权码贴回终端；token 存 `~/.config/colab-cli/token.json`，之后不再弹窗。
 - CLI 会话里 **Colab Secrets（`userdata`）和 `drive.mount()` 都不可用**：内核从 Hugging Face 固定 revision 下载、凭据在生成时写入，不依赖二者；本机有 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 时会自动带上。
-- 浏览器同步（`--sync-colab --run-cell1`）保留为备用入口。
+
+### 备用方案：浏览器网页版同步与运行（`--sync-colab --run-cell1`）
+
+需要浏览器交互控制台、免释放热切换模型、跑归档多模型笔记本或 CLI OAuth 不可用时，走已登录 Edge 的网页通道（按 `BrowserMCP → Playwriter → playwright-cli` 自动降级）：
+
+```bash
+python scripts/make_g4_fn_notebook.py --sync-colab --run-cell1      # 推送 IQ4_XS-plus 并在网页点首格运行
+python scripts/make_g4_fn_nl_notebook.py --sync-colab --run-cell1   # 推送 IQ4_NL 高精度版并在网页点首格运行
+```
 
 实测（2026-11-06，G4）：开机到 `/v1/models` 可用 130 s；`exec` 结束后 llama-server 等后台进程照常存活，内核变量跨次保留。
 
@@ -63,13 +79,12 @@ else:
     raise RuntimeError("llama-server did not become healthy")
 ```
 
-统一内核（`scripts/colab_kernel.py`）在预热后还做三件事：
+内核（`scripts/colab_kernel.py`）在预热后还做两件事（生产启动不跑拼写探针、不做 SHA-256，`_assert_prod_startup` 会拦住）：
 
-- **拼写探针**：新启动时考 12 道生僻词和 DOM/SVG 标识符题，结果写进 `<root>/spell-probe.json`。查找表（如 PLE）或量化出问题时，跑分和推理可能看不出来，最先坏的是拼写，所以错 2 题以上要先排查权重文件和分片摆放，再拿去写长篇。
-- **内存回收**：SHA-256 通过后，删掉 `/dev/shm` 里只给显存用的分片副本（运行期由 CPU 读取的 PLE 分片保留）。`--cache-ram` 设为 16 GiB 加上可回收内存的一半，最多 64 GiB。删掉了哪些文件、对应哪个服务 PID 记在 `released-copies.json`，服务不重启时重跑首格不会重新下载；服务挂了或配置变了，就会重新下载这几片。
-- **热切换**：「热切换模型」格不释放 G4：先停掉当前服务、清掉其他模型的文件（`llama-dist` 留着复用），再执行目标模型的首格。Tailscale 与 `svc:qwen` 地址不变，客户端只需换模型名。覆盖内核登记的全部 4 个 G4 模型。
+- **内存回收**：删掉 `/dev/shm` 里只给显存用的分片副本（运行期由 CPU 读取的 PLE 分片保留）。`--cache-ram` 设为 16 GiB 加上可回收内存的一半，最多 64 GiB。删掉了哪些文件、对应哪个服务 PID 记在 `released-copies.json`，服务不重启时重跑首格不会重新下载；服务挂了或配置变了，就会重新下载这几片。
+- **热切换**：「热切换模型」格不释放 G4：先停掉当前服务、清掉其他模型的文件（`llama-dist` 留着复用），再执行目标模型的首格。Tailscale 与 `svc:qwen` 地址不变，客户端只需换模型名。覆盖内核登记的全部 G4 模型。
 
-完成条件：`/health` 返回 200，`/v1/models` 返回预期模型 ID，预热请求成功，拼写探针至少 11/12。
+完成条件：`/health` 返回 200，`/v1/models` 返回预期模型 ID，预热请求成功。怀疑权重或分片摆放有问题时，再手动对比一段已知输出，不在启动时考拼写。
 
 ## 4. 调参与验收
 
@@ -81,11 +96,11 @@ else:
 - 用同一提示至少做一次冷请求和两次连续请求，记录 prompt/output tokens、耗时、`predicted_per_second`。
 - 工具型客户端另做一次真实工具调用；文本聊天成功不代表工具调用兼容。
 
-具体模型的已验证参数、文件哈希、笔记本位置与启动细节（统一由 [`scripts/colab_kernel.py`](scripts/colab_kernel.py) 内核维护与一键分发：`python scripts/colab_kernel.py --all --sync-colab --sync-magpie`，WebUI 本机小说目录读写桥为 [`scripts/local_novel_mcp.py`](scripts/local_novel_mcp.py)）：
+具体模型的已验证参数、文件哈希、笔记本位置与启动细节（由 [`scripts/colab_kernel.py`](scripts/colab_kernel.py) 维护与一键分发：`python scripts/colab_kernel.py --all --sync-magpie`；Colab 会话开着时别重新生成，会覆盖正在用的笔记本，WebUI 本机小说目录读写桥为 [`scripts/local_novel_mcp.py`](scripts/local_novel_mcp.py)）：
 - G4 96GB（综合 1 · 125B 小说共创调优版：`Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS`）：见 [`references/qwen38-flash-next-g4.md`](references/qwen38-flash-next-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-g4-colab.ipynb)（薄入口 [`scripts/make_g4_fn_notebook.py`](scripts/make_g4_fn_notebook.py)）。
-- G4 96GB（笔记本 2 · 122B Kimi+Opus 蒸馏破限版：`Qwopus3.5-122B-A10B-Kimi-Q4_K_M`）：见 [`references/qwen35-122b-g4.md`](references/qwen35-122b-g4.md)，笔记本在 [`notebooks/qwen3.5-122b-g4-colab.ipynb`](notebooks/qwen3.5-122b-g4-colab.ipynb)（生成脚本 [`scripts/make_122b_qwen35_notebook.py`](scripts/make_122b_qwen35_notebook.py)）。
-- G4 96GB（笔记本 3 · 120B 异构混合破限版：`Nemotron-3.5-Super-VL-120B-Heretic`）：见 [`references/nemotron-120b-g4.md`](references/nemotron-120b-g4.md)，笔记本在 [`notebooks/nemotron-120b-g4-colab.ipynb`](notebooks/nemotron-120b-g4-colab.ipynb)（生成脚本 [`scripts/make_120b_nemotron_notebook.py`](scripts/make_120b_nemotron_notebook.py)）。
-- G4 96GB / A100 40GB（笔记本 4 · 31B 人感破限版：`Gemma-4-31B-Ortenzya-Heretic-Q8_0`）：见 [`references/gemma4-31b-g4.md`](references/gemma4-31b-g4.md)，笔记本在 [`notebooks/gemma4-31b-g4-colab.ipynb`](notebooks/gemma4-31b-g4-colab.ipynb)（生成脚本 [`scripts/make_31b_gemma4_notebook.py`](scripts/make_31b_gemma4_notebook.py)）。
+- G4 96GB（综合 1 高精度版，同权重 IQ4_NL，待实机 A/B：`Swift-1.5-Qwen3.8-Flash-Next-IQ4_NL`）：见 [`references/qwen38-flash-next-nl-g4.md`](references/qwen38-flash-next-nl-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb)（薄入口 [`scripts/make_g4_fn_nl_notebook.py`](scripts/make_g4_fn_nl_notebook.py)）。
+- G4 96GB（Strata 实验，未实测，不进内核：Unsloth `UD-IQ4_XS-v31`）：见 [`references/qwen38-flash-next-strata-g4.md`](references/qwen38-flash-next-strata-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-strata-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-strata-g4-colab.ipynb)（[`scripts/make_strata_fn_notebook.py`](scripts/make_strata_fn_notebook.py)）。不要和上面两本同时开。
+- 已移出内核（2026-11-06 冻结）：122B Qwopus、Nemotron-120B、Gemma-4-31B。最后一版笔记本仍在 `notebooks/`，可在浏览器里手动跑，但不再更新，`colab_cli.py` 也不认它们；当时的多模型内核、生成脚本和参考文档在 [`archive/multi-model-kernel/`](archive/multi-model-kernel/)，要恢复就把归档里的 `colab_kernel.py` 换回 `scripts/`。
 
 完成条件：模型 ID、思考字段、至少两次正常生成和一次工具调用均有可复核结果。
 
@@ -125,7 +140,7 @@ OAuth 客户端现场签发带 `tag:colab` 的一次性 `ephemeral` auth key 加
 
 ## 6. 接入 pi
 
-本机已有 Magpie 时，优先在 Magpie 原生注册 custom provider，上游填 Tailscale Service 的完整 HTTPS `/v1` 地址与模型 key；pi 复用已有本机网关 `http://127.0.0.1:3425/v1`。用 `magpie model context/output/efforts` 管理模型声明并下发，不同时手改 Magpie 生成的 pi 条目。本机已在 Magpie `qwen-colab` 下注册内核登记的 4 个模型（由 `colab_kernel.py --sync-magpie` 按 `MODELS` 下发），分时复用 `http://qwen.<YOUR_TAILNET>.ts.net:443/v1`，pi 调用名加 `magpie/` 前缀；具体命令及边界见各模型参考文档。Magpie 负责模型请求和 token 用量，Colab 仍负责运行时与 CU；不上路由组即可按需手选，离线时不自动换供应商。
+本机已有 Magpie 时，优先在 Magpie 原生注册 custom provider，上游填 Tailscale Service 的完整 HTTPS `/v1` 地址与模型 key；pi 复用已有本机网关 `http://127.0.0.1:3425/v1`。用 `magpie model context/output/efforts` 管理模型声明并下发，不同时手改 Magpie 生成的 pi 条目。本机已在 Magpie `qwen-colab` 下注册内核登记的模型（`colab_kernel.py --sync-magpie` 会把该供应商的模型列表整体换成 `MODELS` 里的别名，不在注册表里的旧条目会被删；只加一个时用 `magpie provider models qwen-colab <现有全部 id> <新 id>` 再补 `magpie model spec`），分时复用 `http://qwen.<YOUR_TAILNET>.ts.net:443/v1`，pi 调用名加 `magpie/` 前缀；具体命令及边界见各模型参考文档。Magpie 负责模型请求和 token 用量，Colab 仍负责运行时与 CU；不上路由组即可按需手选，离线时不自动换供应商。
 
 没有 Magpie、需要独立直连时才使用下面的脚本。
 

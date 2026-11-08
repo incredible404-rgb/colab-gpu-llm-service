@@ -1,13 +1,16 @@
 """Zero-overhead local MCP server (Streamable HTTP) for llama-server WebUI novel writing.
 
-Exposes C:\\Users\\<user>\\Documents\\Colab创作 to the WebUI at http://qwen.<tailnet>.ts.net:443/ directly from the
+Exposes ~/Documents/Colab创作 (or $NOVEL_ROOT) to the WebUI at http://qwen.<tailnet>.ts.net:443/ directly from the
 local Edge browser via http://127.0.0.1:3426/mcp (useProxy: false), with CORS + Chromium Private
 Network Access headers so the browser connects directly to localhost without going through Colab.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import re
+import shutil
 import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,11 +18,11 @@ from pathlib import Path
 
 HOST = '0.0.0.0'
 PORT = 3426
-NOVEL_ROOT = Path('C:/Users/<user>/Documents/Colab创作').resolve()
+NOVEL_ROOT = Path(os.environ.get('NOVEL_ROOT') or (Path.home() / 'Documents/Colab创作')).resolve()
 SKILL_MAP = {
-    'skill:grilling': Path('C:/Users/<user>/.agents/skills/grilling/SKILL.md'),
-    'skill:prompting': Path('C:/Users/<user>/.agents/skills/universal-model-prompting/SKILL.md'),
-    'skill:retro': Path('C:/Users/<user>/.agents/skills/retro/SKILL.md'),
+    'skill:grilling': Path.home() / '.agents/upstream/mattpocock-skills/skills/productivity/grilling/SKILL.md',
+    'skill:prompting': Path.home() / '.agents/skills/universal-model-prompting/SKILL.md',
+    'skill:retro': Path.home() / '.agents/skills/retro/SKILL.md',
 }
 SESSION_ID = 'local-novel-mcp-v1'
 
@@ -203,7 +206,7 @@ TOOLS = [
     {
         'name': 'list_novel_files',
         'title': '列出本机小说目录与文件',
-        'description': '列出 C:/Users/<user>/Documents/Colab创作 下的书籍子目录与 .md 文件（含行数和字节大小）。',
+        'description': '列出 ~/Documents/Colab创作 下的书籍子目录与 .md 文件（含行数和字节大小）。',
         'inputSchema': {
             'type': 'object',
             'properties': {
@@ -234,31 +237,85 @@ TOOLS = [
     },
     {
         'name': 'grep_reference',
-        'title': '检索原作参考片段',
-        'description': '在原作参考文件（如 "参考1_原版.md" 或 "小说1_吕凤先/吕凤先传1~4章原版参考.md"）中按关键词或正则搜索片段及上下文，避免整本读取。',
+        'title': '搜索正文与参考',
+        'description': '在小说目录的 .md/.txt 里搜索，返回行号和上下文。一次可查多个关键词（queries）、多个文件或目录（paths）；不传路径就搜整个目录（不含 archive）。',
         'inputSchema': {
             'type': 'object',
             'properties': {
-                'path': {'type': 'string', 'description': '要检索的文件或子目录相对路径'},
-                'query': {'type': 'string', 'description': '关键词或正则表达式'},
-                'context_lines': {'type': 'integer', 'description': '前后上下文行数（默认 3）'},
-                'max_matches': {'type': 'integer', 'description': '最大返回命中数（默认 10）'},
+                'query': {'type': 'string', 'description': '一个关键词或正则'},
+                'queries': {'type': 'array', 'items': {'type': 'string'}, 'description': '多个关键词或正则，一次查完'},
+                'path': {'type': 'string', 'description': '一个文件或目录的相对路径'},
+                'paths': {'type': 'array', 'items': {'type': 'string'}, 'description': '多个文件或目录'},
+                'glob': {'type': 'string', 'description': '按文件名过滤，如 "第*章*.md"'},
+                'regex': {'type': 'boolean', 'description': '默认 true；false 时按字面匹配'},
+                'context_lines': {'type': 'integer', 'description': '前后上下文行数（默认 2）'},
+                'max_matches': {'type': 'integer', 'description': '最多返回多少处（默认 20，上限 60）'},
             },
-            'required': ['path', 'query'],
+        },
+    },
+    {
+        'name': 'outline_novel_file',
+        'title': '章节结构索引',
+        'description': '列出标题树：每个标题的起止行号和净汉字数，外加文件总行数和总汉字数。path 可以是文件、目录或 "ALL"。用它定位章节，再用 read_novel_file 按行号读。',
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': '文件或目录相对路径，或 "ALL"'},
+                'max_level': {'type': 'integer', 'description': '只显示到第几级标题（2 = 只看 #/##）；单文件默认 6，目录默认 2'},
+            },
+            'required': ['path'],
         },
     },
     {
         'name': 'edit_novel_file',
-        'title': '原位修改小说或写作要求',
-        'description': '将目标 .md 文件中的 old_text 精确替换为 new_text（保持 UTF-8 编码）。',
+        'title': '精确替换（可批量）',
+        'description': '把 old_text 精确替换为 new_text。old_text 必须只命中一处，多处命中会报错并列出行号（全部替换就传 replace_all=true）。批量改用 edits 数组，可跨文件；任何一条不成立就一条都不改。',
         'inputSchema': {
             'type': 'object',
             'properties': {
-                'path': {'type': 'string', 'description': '文件相对路径（如 "小说1_吕凤先/写作要求.md"）'},
+                'path': {'type': 'string', 'description': '文件相对路径（单条修改时用）'},
                 'old_text': {'type': 'string', 'description': '要被替换的原文片段'},
                 'new_text': {'type': 'string', 'description': '替换后的新文本'},
+                'replace_all': {'type': 'boolean', 'description': '替换全部命中（默认 false）'},
+                'edits': {
+                    'type': 'array',
+                    'description': '批量修改：[{path, old_text, new_text, replace_all?}, ...]，按顺序执行',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'path': {'type': 'string'},
+                            'old_text': {'type': 'string'},
+                            'new_text': {'type': 'string'},
+                            'replace_all': {'type': 'boolean'},
+                        },
+                        'required': ['path', 'old_text', 'new_text'],
+                    },
+                },
             },
-            'required': ['path', 'old_text', 'new_text'],
+        },
+    },
+    {
+        'name': 'move_novel_file',
+        'title': '移动或改名',
+        'description': '移动或改名文件或整个目录，目标的上级目录不存在会自动建。传 new_path 是移到新位置，传 new_name 是原地改名。目标已存在就拒绝；版本快照跟着走。',
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': '源文件或目录相对路径'},
+                'new_path': {'type': 'string', 'description': '目标相对路径（含文件名）'},
+                'new_name': {'type': 'string', 'description': '只改名时的新名字'},
+            },
+            'required': ['path'],
+        },
+    },
+    {
+        'name': 'delete_novel_file',
+        'title': '删除（进回收区）',
+        'description': '删除文件或目录：移进 archive/.trash/<时间>/，不是永久删除；要恢复就用 move_novel_file 移回原处。',
+        'inputSchema': {
+            'type': 'object',
+            'properties': {'path': {'type': 'string', 'description': '文件或目录相对路径'}},
+            'required': ['path'],
         },
     },
     {
@@ -281,12 +338,26 @@ TOOLS = [
     },
     {
         'name': 'undo_novel_write',
-        'title': '撤回上一版正文',
-        'description': '用户要撤回刚才的修改时，把文件恢复到上一版。',
+        'title': '撤回或恢复到指定版本',
+        'description': '不传 version 就撤回到上一版；传 version（list_novel_history 给的版本号）就恢复到那一版。恢复前的当前版本会另存，可以再撤回。',
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'path': {'type': 'string', 'description': '文件相对路径（如 "小说1_吕凤先/性转吕凤先传（重写版）.md"）'},
+                'version': {'type': 'string', 'description': '可选，版本号如 "20261106-163000"'},
+            },
+            'required': ['path'],
+        },
+    },
+    {
+        'name': 'list_novel_history',
+        'title': '版本历史',
+        'description': '列出文件最近 N 个版本：版本号、时间、行数、净汉字数、末章标题。',
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'path': {'type': 'string', 'description': '文件相对路径'},
+                'n': {'type': 'integer', 'description': '列出几版（默认 10）'},
             },
             'required': ['path'],
         },
@@ -300,15 +371,11 @@ def _count_hanzi(text: str) -> int:
 
 
 def _hanzi_receipt(content: str, full_text: str) -> str:
-    """Suffix for a successful write: this round's hanzi against the default 8000±500 band."""
+    """Suffix for a successful write: counts only, no length target (a target nudged the model into padding)."""
     hanzi = _count_hanzi(content)
     total_hanzi = _count_hanzi(full_text)
     lines = len(full_text.splitlines())
-    if 7500 <= hanzi <= 8500:
-        band = '符合默认 8000±500 字区间'
-    else:
-        band = '偏离默认 7500~8500 字区间，若非用户特批或章节收尾，下轮请注意按 4 个场景节拍控量'
-    return f'（本轮净汉字: {hanzi} 字 [{band}]，当前文件总汉字: {total_hanzi} 字，总行数: {lines}）'
+    return f'（本轮净汉字: {hanzi} 字，当前文件总汉字: {total_hanzi} 字，总行数: {lines}）'
 
 
 def _strip_pause_tail(text: str) -> str:
@@ -636,6 +703,189 @@ def _guarded_write(rel: str, p: Path, mode: str, content: str) -> str:
     return _do_append(None)
 
 
+SNAPSHOT_ROOT_REL = 'archive/.snapshots'
+TRASH_ROOT_REL = 'archive/.trash'
+_MD_HEADING_RE = re.compile(r'^(#{1,6})\s+(.+?)\s*#*\s*$')
+_PLAIN_CHAPTER_RE = re.compile(r'^\s*第\s*[0-9一二三四五六七八九十百千两零〇]+\s*[章节回部卷]')
+_OUTPUT_CAP = 40000
+
+
+def _rel_of(p: Path) -> str:
+    return p.relative_to(NOVEL_ROOT).as_posix()
+
+
+def _under(rel: str, prefix: str) -> bool:
+    return rel == prefix or rel.startswith(prefix + '/')
+
+
+def _text_stats(text: str) -> str:
+    return f'总行数: {len(text.splitlines())}，净汉字: {_count_hanzi(text)}'
+
+
+def _mutable_target(rel: str) -> Path:
+    """Resolve a path that move / delete may touch: inside the root, not the root, not the snapshot store."""
+    if rel.strip().startswith('skill:'):
+        raise ValueError('技能文件为只读')
+    p = _safe_path(rel)
+    if p == NOVEL_ROOT:
+        raise ValueError('不能移动或删除小说根目录')
+    r = _rel_of(p)
+    if _under(r, SNAPSHOT_ROOT_REL) or _under(SNAPSHOT_ROOT_REL, r):
+        raise ValueError('archive/.snapshots 是版本快照区，它和包含它的目录都禁止移动或删除')
+    return p
+
+
+def _merge_move(src: Path, dst: Path) -> None:
+    for f in sorted(src.rglob('*')):
+        if f.is_file():
+            t = dst / f.relative_to(src)
+            t.parent.mkdir(parents=True, exist_ok=True)
+            while t.exists():
+                t = t.with_name(t.name + '.moved')
+            shutil.move(str(f), str(t))
+    shutil.rmtree(src, ignore_errors=True)
+
+
+def _move_with_snapshots(src: Path, dst: Path) -> int:
+    """Move src to dst and carry its snapshots along, so history and undo keep working. Returns #snapshots moved."""
+    is_dir = src.is_dir()
+    backups = [] if is_dir else _list_backups(src)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dst))
+    snap_root = NOVEL_ROOT / SNAPSHOT_ROOT_REL
+    if is_dir:
+        s = snap_root / _rel_of(src)
+        if not s.is_dir():
+            return 0
+        n = sum(1 for f in s.rglob('*') if f.is_file())
+        _merge_move(s, snap_root / _rel_of(dst))
+        return n
+    new_dir = _snapshot_dir_for(dst)
+    if new_dir is None:
+        return 0
+    new_dir.mkdir(parents=True, exist_ok=True)
+    for bak in backups:
+        target = new_dir / (dst.name + bak.name[len(src.name):])
+        while target.exists():
+            target = target.with_name(target.name + '.moved')
+        shutil.move(str(bak), str(target))
+    return len(backups)
+
+
+def _md_files(base: Path, include_archive: bool) -> list[Path]:
+    if base.is_file():
+        return [base]
+    out = []
+    for p in sorted(base.rglob('*')):
+        if not p.is_file() or p.suffix.lower() not in ('.md', '.txt'):
+            continue
+        parts = p.relative_to(NOVEL_ROOT).parts
+        if any(part.startswith('.') for part in parts):
+            continue
+        if not include_archive and 'archive' in parts:
+            continue
+        out.append(p)
+    return out
+
+
+def _outline_one(p: Path, max_level: int) -> str:
+    text = p.read_bytes().decode('utf-8', errors='replace')
+    lines = text.splitlines()
+    heads = []
+    for i, line in enumerate(lines, 1):
+        m = _MD_HEADING_RE.match(line)
+        if m:
+            heads.append((i, len(m.group(1)), m.group(2).strip()))
+    if not heads:
+        # Plain-text originals mark chapters without '#'; treat those lines as level-2 headings.
+        heads = [(i, 2, line.strip()) for i, line in enumerate(lines, 1) if _PLAIN_CHAPTER_RE.match(line)]
+    rows = [f'[{_rel_of(p)} | 共 {len(lines)} 行 / 净汉字 {_count_hanzi(text)} / {p.stat().st_size:,} 字节]']
+    for idx, (start, level, title) in enumerate(heads):
+        if level > max_level:
+            continue
+        end = len(lines)
+        for nxt_start, nxt_level, _ in heads[idx + 1:]:
+            if nxt_level <= level:
+                end = nxt_start - 1
+                break
+        hanzi = _count_hanzi('\n'.join(lines[start - 1:end]))
+        rows.append(f'{"  " * (level - 1)}{"#" * level} {title}  第 {start}–{end} 行（净汉字 {hanzi}）')
+    if len(rows) == 1:
+        rows.append('  （没有标题）')
+    return '\n'.join(rows)
+
+
+def _line_numbers(text: str, needle: str) -> list[int]:
+    nums, pos = [], text.find(needle)
+    while pos >= 0:
+        nums.append(text.count('\n', 0, pos) + 1)
+        pos = text.find(needle, pos + max(1, len(needle)))
+    return nums
+
+
+def _apply_edits(edits: list) -> str:
+    """Validate every edit against in-memory text first; write only if all hold, and roll back on a write error."""
+    if not edits:
+        raise ValueError('没有要执行的修改')
+    originals: dict[str, tuple[Path, bytes]] = {}
+    working: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    for i, e in enumerate(edits, 1):
+        rel = str(e.get('path') or '')
+        if not rel or rel.startswith('skill:'):
+            return f'未执行任何修改：第 {i} 条的 path 为空或是只读技能文件。'
+        p = _safe_path(rel)
+        if not p.is_file():
+            return f'未执行任何修改：第 {i} 条的文件不存在：{rel}'
+        key = _rel_of(p)
+        if key not in working:
+            raw = p.read_bytes()
+            try:
+                working[key] = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                return f'未执行任何修改：{key} 不是 UTF-8 文本。'
+            originals[key] = (p, raw)
+            counts[key] = 0
+        old, new = e.get('old_text'), e.get('new_text')
+        if not isinstance(old, str) or not old or not isinstance(new, str):
+            return f'未执行任何修改：第 {i} 条缺少 old_text 或 new_text。'
+        text = working[key]
+        hits = text.count(old)
+        if hits == 0:
+            return f'未执行任何修改：第 {i} 条在 {key} 中找不到 old_text（若前面的条目改过同一段，请按改后的文字写）。请先用 read_novel_file 核对原文。'
+        if hits > 1 and not e.get('replace_all'):
+            lines = ', '.join(str(n) for n in _line_numbers(text, old)[:30])
+            return (f'未执行任何修改：第 {i} 条的 old_text 在 {key} 中命中 {hits} 处（第 {lines} 行）。'
+                    '请加长 old_text 使其唯一，或确认后传 replace_all=true。')
+        working[key] = text.replace(old, new) if e.get('replace_all') else text.replace(old, new, 1)
+        counts[key] += hits if e.get('replace_all') else 1
+    written: list[tuple[str, Path, bytes, str | None]] = []
+    try:
+        for key, (p, raw) in originals.items():
+            data = working[key].encode('utf-8')
+            if data == raw:
+                continue
+            backup = _backup_before_write(p)
+            p.write_bytes(data)
+            written.append((key, p, raw, backup))
+    except Exception:
+        for _key, p, raw, _b in written:
+            p.write_bytes(raw)
+        raise
+    report = []
+    for key, p, raw, backup in written:
+        _audit_write('edit_novel_file', key, 'edit', len(raw), p.stat().st_size, 'ok', backup)
+        report.append(f'已更新 {key}（替换 {counts[key]} 处；{_text_stats(working[key])}；旧版快照 {backup}）')
+    if not report:
+        return '内容没有变化（new_text 与原文相同），未写入。'
+    return '\n'.join(report)
+
+
+def _snapshot_version(bak: Path) -> str:
+    m = _BAK_NAME.match(bak.name)
+    return m.group('stamp') if m else bak.name
+
+
 def _call_tool(name: str, args: dict) -> str:
     if name == 'list_novel_files':
         sub = (args.get('folder') or '').strip()
@@ -670,50 +920,138 @@ def _call_tool(name: str, args: dict) -> str:
         return header + '\n'.join(selected)
 
     if name == 'grep_reference':
-        target = _safe_path(args['path'])
-        query = args['query']
-        ctx = max(0, min(10, int(args.get('context_lines') or 3)))
-        limit = max(1, min(30, int(args.get('max_matches') or 10)))
-        files = [target] if target.is_file() else sorted(target.rglob('*.md'))
-        pat = re.compile(query, re.IGNORECASE)
+        queries = [q for q in ([args.get('query')] + list(args.get('queries') or [])) if isinstance(q, str) and q]
+        if not queries:
+            raise ValueError('至少传一个 query 或 queries')
+        raw_paths = [x for x in ([args.get('path')] + list(args.get('paths') or [])) if isinstance(x, str) and x.strip()]
+        ctx = max(0, min(10, int(args.get('context_lines') if args.get('context_lines') is not None else 2)))
+        limit = max(1, min(60, int(args.get('max_matches') or 20)))
+        use_regex = args.get('regex') is not False
+        pats = [re.compile(q if use_regex else re.escape(q), re.IGNORECASE) for q in queries]
+        glob = (args.get('glob') or '').strip()
+        files: list[Path] = []
+        for rp in raw_paths or ['']:
+            base = _safe_path(rp) if rp else NOVEL_ROOT
+            if not base.exists():
+                return f'路径不存在: {rp}'
+            in_archive = base != NOVEL_ROOT and _under(_rel_of(base), 'archive')
+            for f in _md_files(base, include_archive=in_archive):
+                if f not in files and (not glob or fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(_rel_of(f), glob)):
+                    files.append(f)
+        totals = [0] * len(queries)
         hits = []
         for f in files:
-            rel = f.relative_to(NOVEL_ROOT).as_posix() if NOVEL_ROOT in f.parents else f.name
-            flines = f.read_text(encoding='utf-8', errors='replace').splitlines()
+            rel = _rel_of(f) if NOVEL_ROOT in f.parents else f.name
+            flines = f.read_bytes().decode('utf-8', errors='replace').splitlines()
             for idx, line in enumerate(flines):
-                if pat.search(line):
-                    s = max(0, idx - ctx)
-                    e = min(len(flines), idx + ctx + 1)
+                matched = [i for i, pat in enumerate(pats) if pat.search(line)]
+                if not matched:
+                    continue
+                for i in matched:
+                    totals[i] += 1
+                if len(hits) < limit:
+                    s, e = max(0, idx - ctx), min(len(flines), idx + ctx + 1)
                     snippet = '\n'.join(f'  {k + 1}: {flines[k]}' for k in range(s, e))
-                    hits.append(f'=== {rel} (第 {idx + 1} 行) ===\n{snippet}')
-                    if len(hits) >= limit:
-                        break
-            if len(hits) >= limit:
-                break
-        return '\n\n'.join(hits) if hits else f'未找到匹配 "{query}" 的片段'
+                    tag = '、'.join(queries[i] for i in matched)
+                    hits.append(f'=== {rel} 第 {idx + 1} 行 [命中: {tag}] ===\n{snippet}')
+        summary = '命中统计（共搜 {} 个文件）：'.format(len(files)) + '；'.join(
+            f'{q} {n} 行' for q, n in zip(queries, totals))
+        if not hits:
+            return summary + '\n未找到匹配的片段'
+        shown = '' if sum(totals) <= limit else f'（只显示前 {limit} 处，可加 max_matches 或缩小范围）'
+        return (summary + shown + '\n\n' + '\n\n'.join(hits))[:_OUTPUT_CAP]
+
+    if name == 'outline_novel_file':
+        rp = str(args.get('path') or 'ALL').strip()
+        base = NOVEL_ROOT if rp.upper() == 'ALL' else _safe_path(rp)
+        if not base.exists():
+            return f'路径不存在: {rp}'
+        default_level = 6 if base.is_file() else 2
+        max_level = max(1, min(6, int(args.get('max_level') or default_level)))
+        in_archive = base != NOVEL_ROOT and base.is_dir() and _under(_rel_of(base), 'archive')
+        files = _md_files(base, include_archive=in_archive)
+        if not files:
+            return '未找到 .md / .txt 文件'
+        out = '\n\n'.join(_outline_one(f, max_level) for f in files)
+        if len(out) > _OUTPUT_CAP:
+            out = out[:_OUTPUT_CAP] + '\n……（输出太长已截断，请缩小范围或调低 max_level）'
+        return out
 
     if name == 'edit_novel_file':
-        rel = str(args['path'])
+        if args.get('edits'):
+            edits = args['edits']
+            if not isinstance(edits, list):
+                raise ValueError('edits 必须是数组')
+        else:
+            edits = [{k: args.get(k) for k in ('path', 'old_text', 'new_text', 'replace_all')}]
+        return _apply_edits(edits)
+
+    if name == 'move_novel_file':
+        rel = str(args.get('path') or '')
+        src = _mutable_target(rel)
+        if not src.exists():
+            return f'不存在: {rel}'
+        new_name = (args.get('new_name') or '').strip()
+        new_path = (args.get('new_path') or '').strip()
+        if bool(new_name) == bool(new_path):
+            raise ValueError('new_path 和 new_name 二选一')
+        if new_name:
+            if '/' in new_name or '\\' in new_name or new_name in ('.', '..'):
+                raise ValueError('new_name 只能是名字，不能带路径；移动请用 new_path')
+            dst = src.parent / new_name
+            dst_rel = _rel_of(dst)
+            dst = _mutable_target(dst_rel)
+        else:
+            dst = _mutable_target(new_path)
+        if dst.exists():
+            return f'目标已存在，未移动: {_rel_of(dst)}'
+        if src.is_dir() and (dst == src or src in dst.parents):
+            raise ValueError('不能把目录移进它自己里面')
+        moved = _move_with_snapshots(src, dst)
+        _audit_write('move_novel_file', _rel_of(src), 'move->' + _rel_of(dst), 0, 0, 'ok', None)
+        kind = '目录' if dst.is_dir() else '文件'
+        return f'已把{kind} {_rel_of(src)} 移到 {_rel_of(dst)}（随行快照 {moved} 份）。'
+
+    if name == 'delete_novel_file':
+        rel = str(args.get('path') or '')
+        src = _mutable_target(rel)
+        if not src.exists():
+            return f'不存在: {rel}'
+        src_rel = _rel_of(src)
+        if _under(src_rel, TRASH_ROOT_REL):
+            return '回收区里的东西不再删除；需要彻底清除请让用户在本机手动处理。'
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        dst = NOVEL_ROOT / TRASH_ROOT_REL / stamp / src_rel
+        n = 2
+        while dst.exists():
+            dst = NOVEL_ROOT / TRASH_ROOT_REL / f'{stamp}-{n}' / src_rel
+            n += 1
+        moved = _move_with_snapshots(src, dst)
+        _audit_write('delete_novel_file', src_rel, 'trash->' + _rel_of(dst), 0, 0, 'ok', None)
+        return (f'已把 {src_rel} 移进回收区 {_rel_of(dst)}（随行快照 {moved} 份）。'
+                f'要恢复：move_novel_file(path="{_rel_of(dst)}", new_path="{src_rel}")。')
+
+    if name == 'list_novel_history':
+        rel = str(args.get('path') or '')
         p = _safe_path(rel)
-        if rel.startswith('skill:'):
-            _audit_write('edit_novel_file', rel, 'edit', 0, 0, 'rejected', None)
-            raise ValueError('技能文件为只读')
-        if not p.exists():
-            _audit_write('edit_novel_file', rel, 'edit', 0, 0, 'missing', None)
+        if rel.startswith('skill:') or not p.is_file():
             return f'文件不存在: {rel}'
-        old_bytes = p.stat().st_size
-        raw = p.read_text(encoding='utf-8')
-        old_text = args['old_text']
-        new_text = args['new_text']
-        if old_text not in raw:
-            _audit_write('edit_novel_file', rel, 'edit', old_bytes, old_bytes, 'not_found', None)
-            return f'未在 {rel} 中找到完全匹配的 old_text，请先用 read_novel_file 核对原文。'
-        backup = _backup_before_write(p)
-        updated = raw.replace(old_text, new_text, 1)
-        p.write_text(updated, encoding='utf-8', newline='')
-        new_bytes = p.stat().st_size
-        _audit_write('edit_novel_file', rel, 'edit', old_bytes, new_bytes, 'ok', backup)
-        return f'已成功更新 {rel}（总行数: {len(updated.splitlines())}）'
+        n = max(1, min(30, int(args.get('n') or 10)))
+        current = p.read_bytes()
+        cur_text = current.decode('utf-8', errors='replace')
+        rows = [f'当前版本：{_text_stats(cur_text)}，末章「{_last_chapter_title(cur_text)}」']
+        backups = _list_backups(p)
+        if not backups:
+            return rows[0] + '\n没有历史快照。'
+        for bak in reversed(backups[-n:]):
+            data = bak.read_bytes()
+            t = data.decode('utf-8', errors='replace')
+            same = '（与当前相同）' if data == current else ''
+            v = _snapshot_version(bak)
+            when = f'{v[:4]}-{v[4:6]}-{v[6:8]} {v[9:11]}:{v[11:13]}:{v[13:15]}' if len(v) >= 15 else v
+            rows.append(f'version={v}  {when}  {_text_stats(t)}，末章「{_last_chapter_title(t)}」{same}')
+        rows.append(f'共 {len(backups)} 份快照（最多保留 {SNAPSHOT_KEEP} 份）。恢复用 undo_novel_write(path, version)。')
+        return '\n'.join(rows)
 
     if name == 'write_novel_file':
         rel = str(args['path'])
@@ -752,7 +1090,14 @@ def _call_tool(name: str, args: dict) -> str:
         if not backups:
             _audit_write('undo_novel_write', rel, 'restore', old_bytes, old_bytes, 'missing_snapshot', None)
             return f'没有可撤回的快照：{rel} 在 archive/.snapshots 中没有 .bak。当前文件未改动（{old_bytes} 字节）。'
-        source = backups[-1]
+        version = str(args.get('version') or '').strip()
+        if version:
+            picked = [b for b in backups if _snapshot_version(b) == version]
+            if not picked:
+                return f'找不到版本 {version}，请先用 list_novel_history 查看可用版本号。当前文件未改动。'
+            source = picked[-1]
+        else:
+            source = backups[-1]
         source_bytes = source.read_bytes()
         old_text = current.decode('utf-8', errors='replace')
         old_lines = len(old_text.splitlines())
@@ -772,7 +1117,7 @@ def _call_tool(name: str, args: dict) -> str:
         new_bytes = p.stat().st_size
         _audit_write('undo_novel_write', rel, 'restore', old_bytes, new_bytes, 'ok', saved)
         return (
-            f'已撤回 {rel} 到上一版（来源快照 {source_rel}）。\n'
+            f'已把 {rel} 恢复到{"版本 " + version if version else "上一版"}（来源快照 {source_rel}）。\n'
             f'恢复前 {old_bytes} 字节 / {old_lines} 行，末章「{old_title}」\n'
             f'恢复后 {new_bytes} 字节 / {new_lines} 行，末章「{new_title}」\n'
             f'被覆盖的当前版本已另存快照 {saved or "（无）"}，可再次撤回。'
@@ -870,7 +1215,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                     'protocolVersion': proto,
                     'capabilities': {'tools': {'listChanged': False}},
                     'serverInfo': {'name': 'local_novel_fs', 'version': '1.0.0'},
-                    'instructions': '本机小说目录 (C:/Users/<user>/Documents/Colab创作) 读写与原作检索工具。',
+                    'instructions': '本机小说目录 (~/Documents/Colab创作) 读写与原作检索工具。',
                 },
             }
 
