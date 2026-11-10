@@ -35,6 +35,15 @@ n_past/n_decoded, or an explicit last-request timestamp if the build has one.
 Until /slots has answered once, that clock is paused (download/load is not
 idle); if it never answers within the same limit, the session is stopped so a
 failed boot cannot burn CU until the 24 h cap.
+
+Colab-yoga (optional tray app) manages the same runtime with its own idle timer. The beat code
+therefore also reads its status at http://127.0.0.1:7860/api/status inside the VM (2 s limit,
+failure ignored) and prints one YOGA_STATUS line. A model download or VRAM load in progress, or
+an idle countdown that went up since the last reading (someone pressed "extend"), counts as
+activity for both clocks above. Without Colab-yoga there is no such line and nothing changes.
+
+The tailnet name and API key come from secrets_config.load_config, the loader `start` uses:
+a <YOUR_...> placeholder in .secrets.json is skipped in favour of the environment variable.
 """
 from __future__ import annotations
 
@@ -49,12 +58,33 @@ from pathlib import Path
 
 import requests
 
+# Imported before _import_colab() takes this directory off sys.path (scripts/colab_cli.py would shadow the package).
+import secrets_config
+from colab_path import find_colab
+
 FOUR_XX_LIMIT = 2
 PING_INTERVAL_S = 60
 BEAT_INTERVAL_S = 30
 BEAT_TIMEOUT_S = 60
 BEAT_FAIL_LOG_EVERY = 10
-BEAT_CODE = "open('/content/.keepalive_beat', 'w').write(str(__import__('time').time()))\n"
+# One short execution. Everything lives inside a function so the kernel's globals (the notebook cell shares
+# them) gain only the name _keepalive_beat. The Colab-yoga read never raises and is capped at 2 s per step.
+BEAT_CODE = (
+    "def _keepalive_beat():\n"
+    "    import json, time, urllib.request\n"
+    "    with open('/content/.keepalive_beat', 'w') as f:\n"
+    "        f.write(str(time.time()))\n"
+    "    try:\n"
+    "        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+    "        data = json.load(opener.open('http://127.0.0.1:7860/api/status', timeout=2))\n"
+    "        keys = ('idle_remaining_seconds', 'is_downloading', 'is_loading_vram')\n"
+    "        print('YOGA_STATUS ' + json.dumps({k: data.get(k) for k in keys}))\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "_keepalive_beat()\n"
+)
+YOGA_PREFIX = 'YOGA_STATUS '
+YOGA_RESET_SLACK_S = 2  # the countdown only falls between readings; more than this above the last one is a reset
 CREATE_NO_WINDOW = 0x08000000
 MAX_HOURS = 24
 LOG_MAX_BYTES = 256 * 1024
@@ -130,6 +160,43 @@ def inference_active(slots, prev) -> tuple:
     if busy or tokens != prev[1] or stamps != prev[2]:
         return True, fp
     return False, fp
+
+
+def parse_yoga_status(text) -> dict | None:
+    """The Colab-yoga reading from a beat's printed output (a str, or a list of nbformat outputs); None when absent."""
+    if isinstance(text, (list, tuple)):
+        chunks = []
+        for out in text:
+            if isinstance(out, dict) and out.get('output_type') == 'stream':
+                part = out.get('text', '')
+                chunks.append(''.join(part) if isinstance(part, list) else str(part))
+        text = ''.join(chunks)
+    for line in str(text or '').splitlines():
+        if line.startswith(YOGA_PREFIX):
+            try:
+                data = json.loads(line[len(YOGA_PREFIX):])
+            except ValueError:
+                return None
+            return data if isinstance(data, dict) else None
+    return None
+
+
+def yoga_activity(status, prev_remaining) -> tuple:
+    """(active, remaining) for one Colab-yoga reading.
+
+    Active while it downloads or loads a model, or when its idle countdown is higher than at the previous
+    reading (reset by /api/touch or a new idle setting). No reading (Colab-yoga not running) is never activity
+    and forgets the previous countdown. -1 means its idle release is off: no countdown to compare.
+    """
+    if not isinstance(status, dict):
+        return False, None
+    remaining = status.get('idle_remaining_seconds')
+    if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+        remaining = None
+    busy = bool(status.get('is_downloading') or status.get('is_loading_vram'))
+    reset = (remaining is not None and remaining >= 0 and prev_remaining is not None and prev_remaining >= 0
+             and remaining > prev_remaining + YOGA_RESET_SLACK_S)
+    return busy or reset, remaining
 
 
 def rotate_log(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
@@ -222,21 +289,28 @@ def ping_endpoint(client, endpoint, ColabRequestError, get_status_code) -> tuple
 
 
 def beat_argv(session: str, path: str) -> list[str]:
-    return ['colab', 'exec', '-s', session, '-f', path, '--timeout', str(BEAT_TIMEOUT_S)]
+    return [find_colab(), 'exec', '-s', session, '-f', path, '--timeout', str(BEAT_TIMEOUT_S)]
 
 
 def kernel_beat(session: str, path: str) -> tuple:
-    """One short kernel execution. Returns (ok, detail). No console window from pythonw."""
+    """One short kernel execution via `colab exec`. Returns (ok, detail, stdout text).
+
+    No console window from pythonw. The text carries the YOGA_STATUS line when Colab-yoga answered.
+    """
     try:
         r = subprocess.run(beat_argv(session, path), capture_output=True, timeout=BEAT_TIMEOUT_S + 30,
+                           stdin=subprocess.DEVNULL,
                            creationflags=CREATE_NO_WINDOW if os.name == 'nt' else 0,
                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
     except subprocess.TimeoutExpired:
-        return False, 'timeout'
+        return False, 'timeout', ''
+    except OSError as err:  # colab missing or not runnable: a failed beat, never a dead daemon
+        return False, 'exec %s: %s' % (type(err).__name__, str(err)[:120]), ''
+    text = (r.stdout or b'').decode('utf-8', 'replace')
     if r.returncode == 0:
-        return True, 'rc0'
+        return True, 'rc0', text
     tail = (r.stdout or b'') + (r.stderr or b'')
-    return False, 'rc%d %s' % (r.returncode, tail.decode('utf-8', 'replace').strip()[-160:])
+    return False, 'rc%d %s' % (r.returncode, tail.decode('utf-8', 'replace').strip()[-160:]), text
 
 
 class InProcessBeat:
@@ -266,6 +340,7 @@ class InProcessBeat:
         self._hard_timeout = BEAT_TIMEOUT_S + 30 if hard_timeout is None else hard_timeout
         self.fails = 0
         self.exec_left = 0
+        self.yoga = None  # Colab-yoga reading carried by the latest beat, None when it printed none
         self.disabled = os.environ.get('COLAB_KEEPALIVE_BEAT', '').strip().lower() == 'exec'
 
     def via(self) -> str:
@@ -278,9 +353,10 @@ class InProcessBeat:
         return self._runtime_cls
 
     def _once(self) -> tuple:
+        """(ok, detail, outputs) for one in-process beat."""
         s = self.state.get_session(self.session, ignore_missing_session=True)
         if s is None:
-            return False, 'inproc no_session'
+            return False, 'inproc no_session', []
 
         def on_kernel(kid):
             s.kernel_id = kid
@@ -301,8 +377,8 @@ class InProcessBeat:
                 pass
         err = next((o for o in outputs if o.get('output_type') == 'error'), None)
         if err is not None:
-            return False, 'inproc kernel_error %s' % err.get('ename', '')
-        return True, 'inproc'
+            return False, 'inproc kernel_error %s' % err.get('ename', ''), outputs
+        return True, 'inproc', outputs
 
     def _guarded(self) -> tuple:
         box = {}
@@ -311,28 +387,38 @@ class InProcessBeat:
             try:
                 box['r'] = self._once()
             except BaseException as e:  # a beat must never take the daemon down
-                box['r'] = (False, 'inproc %s: %s' % (type(e).__name__, str(e)[:120]))
+                box['r'] = (False, 'inproc %s: %s' % (type(e).__name__, str(e)[:120]), [])
 
         t = threading.Thread(target=run, name='kernel-beat', daemon=True)
         t.start()
         t.join(self._hard_timeout)
         if t.is_alive():
-            return False, 'inproc hung'
-        return box.get('r', (False, 'inproc no_result'))
+            return False, 'inproc hung', []
+        return box.get('r', (False, 'inproc no_result', []))
+
+    def _run_exec(self, beat_file: str) -> tuple:
+        """The `colab exec` beat as (ok, detail, text); a stand-in that returns (ok, detail) is accepted."""
+        res = self._exec_beat(self.session, beat_file)
+        return res[0], res[1], (res[2] if len(res) > 2 else '')
 
     def beat(self, beat_file: str) -> tuple:
-        """(ok, detail) for one beat; detail names the path that delivered it."""
+        """(ok, detail) for one beat; detail names the path that delivered it. self.yoga holds its Colab-yoga reading."""
+        self.yoga = None
         if self.disabled or self.exec_left > 0:
             self.exec_left = max(0, self.exec_left - 1)
-            return self._exec_beat(self.session, beat_file)
-        ok, detail = self._guarded()
+            ok, detail, text = self._run_exec(beat_file)
+            self.yoga = parse_yoga_status(text) if ok else None
+            return ok, detail
+        ok, detail, outputs = self._guarded()
         if ok:
             self.fails = 0
+            self.yoga = parse_yoga_status(outputs)
             return ok, detail
         self.fails += 1
         if self.fails >= self.FALLBACK_AFTER:
             self.fails, self.exec_left = 0, self.FALLBACK_BEATS
-        ok2, detail2 = self._exec_beat(self.session, beat_file)
+        ok2, detail2, text = self._run_exec(beat_file)
+        self.yoga = parse_yoga_status(text) if ok2 else None
         return ok2, '%s; exec %s' % (detail, detail2)
 
 
@@ -369,17 +455,16 @@ def main(argv: list[str]) -> int:
         with log_file.open('a', encoding='utf-8', newline='\n') as handle:
             handle.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
 
-    secrets_path = Path(__file__).resolve().parents[1] / '.secrets.json'
-    secrets = {}
-    if secrets_path.exists():
-        try:
-            secrets = json.loads(secrets_path.read_text(encoding='utf-8'))
-        except (OSError, ValueError) as err:
-            log('keep_alive_stopped reason=invalid_secrets_json error=%s' % err)
-            return 1
-    fqdn = secrets.get('tailnet_fqdn') or os.environ.get('TAILNET_FQDN', '').strip()
-    api_key = secrets.get('api_key') or os.environ.get('LLAMA_API_KEY', '').strip()
-    if not fqdn or not api_key:
+    # Same loader as `start` (colab_cli._config): a placeholder copied from .secrets.example.json counts as unset,
+    # so an environment variable fills it in. A placeholder tailnet name would leave /slots unreachable and the
+    # never-up guard would stop a runtime somebody is using.
+    try:
+        config = secrets_config.load_config([])[0]
+    except SystemExit as err:
+        log('keep_alive_stopped reason=invalid_secrets_json error=%s' % err)
+        return 1
+    fqdn, api_key = config['tailnet_fqdn'], config['api_key']
+    if secrets_config.is_placeholder(fqdn) or secrets_config.is_placeholder(api_key):
         log('keep_alive_stopped reason=missing_tailnet_fqdn_or_api_key')
         return 1
     slots_url = 'http://%s:443/slots' % fqdn
@@ -411,6 +496,8 @@ def main(argv: list[str]) -> int:
     errors = 0
     pings = 0
     beats = beat_fails = 0
+    yoga_prev = None
+    yoga_was_active = False
     last_ping = None
     slots_http = requests.Session()  # one kept-alive connection to /slots instead of a new TCP connect per minute
     beat_file = cfg / ('keepalive-%s-beat.py' % session)
@@ -432,6 +519,15 @@ def main(argv: list[str]) -> int:
                     log('kernel_beat_error n=%d consecutive=%d detail=%s' % (beats, beat_fails, detail))
             if '; exec ' in detail:
                 log('kernel_beat_fallback n=%d detail=%s' % (beats, detail))
+            # Colab-yoga reports download/load and its own idle countdown through the beat; either is use.
+            yoga_active, yoga_prev = yoga_activity(beater.yoga, yoga_prev)
+            if yoga_active:
+                last_active = time.monotonic()
+                if not yoga_was_active:
+                    log('yoga_activity downloading=%s loading=%s idle_remaining=%s' % (
+                        beater.yoga.get('is_downloading'), beater.yoga.get('is_loading_vram'),
+                        beater.yoga.get('idle_remaining_seconds')))
+            yoga_was_active = yoga_active
             if last_ping is not None and cycle_start - last_ping < PING_INTERVAL_S - 1:
                 time.sleep(max(0.0, BEAT_INTERVAL_S - (time.monotonic() - cycle_start)))
                 continue
@@ -491,7 +587,7 @@ def main(argv: list[str]) -> int:
                 log('keep_alive_stopped reason=idle idle_min=%.0f' % idle)
                 _stop_session(session, log)
                 break
-            if not server_seen and (time.monotonic() - t0) / 60 >= idle_min:
+            if not server_seen and (time.monotonic() - last_active) / 60 >= idle_min:
                 exit_reason = 'server_never_up'
                 log('keep_alive_stopped reason=server_never_up boot_min=%.0f' % ((time.monotonic() - t0) / 60))
                 _stop_session(session, log)
@@ -517,8 +613,8 @@ def main(argv: list[str]) -> int:
 
 def _stop_session(session: str, log) -> None:
     log('idle guard running colab stop -s %s' % session)
-    subprocess.run(['colab', 'stop', '-s', session], capture_output=True, timeout=180,
-                   env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+    subprocess.run([find_colab(), 'stop', '-s', session], capture_output=True, timeout=180,
+                   stdin=subprocess.DEVNULL, env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
 
 
 if __name__ == '__main__':

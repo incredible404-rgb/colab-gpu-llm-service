@@ -89,7 +89,7 @@ python -X utf8 scripts/colab_cli.py stop   --all          # release all + auto-f
 ```
 
 - **Model slugs:** active `qwen38-huihui-v2` (default), `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`; archived ones such as `qwen38-fn` and `qwen38-fn-nl` start by slug too. `python -X utf8 scripts/colab_kernel.py --list` is the source of truth.
-- **Automatic fallback on stop:** If `colab sessions` shows an unnamed `[?]` assignment (for example, a session started from a browser tab or an orphaned CLI assignment), `colab_cli.py stop --all` works through these in order of cost: (1) when Colab-yoga is installed, its bridge `stop_all` (official unassign per endpoint, no browser needed); (2) if anything is left, `colab_sync.py --release-all` from the fallback track, which force-releases via `/tun/m/unassign` and verifies `0 active / 0.00 CU/h` (needs a browser driver); (3) otherwise it prints a hint to end the sessions by hand in Colab's web UI (Runtime, Manage sessions).
+- **Automatic fallback on stop:** If `colab sessions` shows an unnamed `[?]` assignment (for example, a session started from a browser tab or an orphaned CLI assignment), `colab_cli.py stop --all` (only that form escalates; `stop <slug>` stops that one name and never touches other sessions, Colab-yoga's included) works through these in order of cost: (1) when Colab-yoga is installed, its bridge `stop_all` (official unassign per endpoint, no browser needed); (2) if anything is left, `colab_sync.py --release-all` from the fallback track, which force-releases via `/tun/m/unassign` and verifies `0 active / 0.00 CU/h` (needs a browser driver); (3) otherwise it prints a hint to end the sessions by hand in Colab's web UI (Runtime, Manage sessions).
 - CLI sessions cannot read Colab Secrets or mount Drive; the kernel downloads from pinned Hugging Face revisions and forwards a local `HF_TOKEN` when present. G4 rejects `--high-mem`, and `colab exec` times out after 30 s unless `--timeout` is passed; the script handles both.
 
 ## Fallback track: Browser-tab sync, zero-OAuth CU metering and ghost-session kill
@@ -143,8 +143,8 @@ The `/tun/m` endpoints are undocumented and may change. Treat them as a convenie
 |---|---|
 | Paid Colab quota | A Colab Pro / Pro+ / Ultra plan or pay-as-you-go compute units (CU), with G4 selectable on the account; the free tier does not work. Rates and quotas change, see [`references/cu-budget.md`](references/cu-budget.md) |
 | Host | Windows 10/11, Python 3.10+, Git; `pip install requests` (everything else is standard library). Scripts use scheduled tasks and `taskkill` to clean up keep-alive processes; macOS/Linux is untested |
-| Official Colab CLI | `uv tool install "google-colab-cli==0.7.5"`, then `uv tool update-shell` to put uv's tool directory on PATH, then **close and reopen the terminal** and check `colab --version`. The keep-alive design follows 0.7.5's reclamation behavior, so pin this version |
-| First OAuth authorization | Done by **a person in their own terminal**: run `colab sessions`, open the printed link, paste the authorization code back (it waits on `input()`, so an agent without an interactive stdin hangs). Or use the Colab-yoga bridge in two steps: `runtime\python.exe -u bridge\colab_yoga_bridge.py auth_url` for the link, then `... auth_code <code>` after authorizing. Both share `~/.config/colab-cli/token.json` |
+| Official Colab CLI | An agent can run this as is (no terminal restart): `python -m pip install uv`, then `python -m uv tool install "google-colab-cli==0.7.5"`; `python -m uv tool dir --bin` prints the folder holding `colab`, and a PATH-independent call is `"$(python -m uv tool dir --bin)/colab" --version`. The scripts in this repo look for `colab` in `~/.local/bin` and uv's bin directory when it is not on PATH; `python -m uv tool update-shell` (and reopening that terminal) is only needed to type `colab` in a person's own terminal. The keep-alive design follows 0.7.5's reclamation behavior, so pin this version |
+| First OAuth authorization | Done by **a person in their own terminal**: run `colab sessions`, open the printed link, paste the authorization code back (it waits on `input()`; the scripts here close stdin when they call `colab`, so an unauthorized CLI fails at once with a one-line message that carries the link instead of hanging). Or use the Colab-yoga bridge in two steps: `runtime\python.exe -u bridge\colab_yoga_bridge.py auth_url` (Git Bash: `"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" auth_url`) for the link, then `... auth_code <code>` after authorizing. Both share `~/.config/colab-cli/token.json` |
 | Tailscale | Local client >= 1.78, signed in; the `svc:qwen` Service, the `tag:colab` tag and an OAuth client created in your tailnet, with **MagicDNS** and **HTTPS Certificates** switched on in the DNS settings, see [`references/tailscale-serve.md`](references/tailscale-serve.md) |
 | Optional: Colab-yoga | The companion Windows tray GPU manager ([Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga); LLM service only, no video, image or ComfyUI) installed to `%LOCALAPPDATA%\Programs\Colab-yoga`; it shares the same G4 with this repo. No core command depends on it |
 | Optional: fallback track | Node.js, an Edge signed in to Google, and one browser driver: Playwriter (`npm install -g playwriter` + its Edge extension) or `@playwright/cli` (`npm install -g @playwright/cli`), or your own BrowserMCP bridge (`COLAB_BROWSERMCP_BRIDGE`) |
@@ -162,7 +162,7 @@ git clone https://github.com/incredible404-rgb/colab-gpu-llm-service.git ~/.clau
 git clone https://github.com/incredible404-rgb/colab-gpu-llm-service.git ~/.agents/skills/colab-gpu-llm-service
 ```
 
-Then finish the setup in that directory as described under "From clone to first boot". A skills directory can be reinstalled or updated over, so prefer environment variables over `.secrets.json` for the keys (`LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, see the tables below); `.secrets.json` is only read from the repository root, keeping it elsewhere is not supported. Division of labour: start and switch models with this repo's `start`; the tray app Colab-yoga is for viewing, extending, switching and releasing.
+Then finish the setup in that directory as described under "From clone to first boot". A skills directory can be reinstalled or updated over, so prefer environment variables over `.secrets.json` for the keys (`LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, see the tables below; set them as user-level variables; the keep-alive daemon reads config through the same loader as `start`, and an untouched `<YOUR_...>` placeholder in `.secrets.json` yields to the environment variable); `.secrets.json` is only read from the repository root, keeping it elsewhere is not supported. Division of labour: new instance or new model -> this repo's `start`; switching between already exported models, extending, viewing, releasing -> the Colab-yoga tray (its agent skill lives in the Colab-yoga repo under `skills/colab-yoga` and has to be installed separately; every active model is built for a G4, about 96 GB of VRAM).
 
 ### From clone to first boot
 
@@ -180,7 +180,7 @@ python -X utf8 scripts/colab_cli.py stop --all  # release right after use; check
 
 `start` allocates the instance and downloads 100 GB-class weights, so it can block from minutes up to an hour: **do not wait for it in the foreground** (an agent tool call times out first). Run it in the background (`&` in Git Bash, `Start-Process` in PowerShell, or the agent tool's background mode) and watch the log for `[colab_cli] start OK` or `start FAILED`. If the four required fields are empty or still the `<YOUR_...>` placeholders from the example file, `start` exits before allocating anything and burns no CU; on failure the script releases the instance it created, but still verify `0 active` with `status`.
 
-A successful `start` prints `[colab_cli] start OK in <seconds>s`; afterwards `http://qwen.<YOUR_TAILNET>.ts.net:443/v1` is the OpenAI-compatible endpoint (Bearer key is `api_key` from `.secrets.json`) and the root path is the WebUI, both visible only inside your tailnet.
+A successful `start` prints `[colab_cli] start OK in <seconds>s`; afterwards `http://qwen.<YOUR_TAILNET>.ts.net:443/v1` is the OpenAI-compatible endpoint (requests carry `Authorization: Bearer <api_key>`, but the server does not check it, see the `api_key` row below) and the root path is the WebUI, both visible only inside your tailnet. Before `colab new`, `start` / `launch` run a local preflight (the colab CLI's `pythonw.exe`, Tailscale online on this PC, Tailscale OAuth credentials that can mint a token); if one fails they say why and exit without allocating, and `--skip-preflight` overrides it. `status` cannot show the burn rate before boot (0 with no active instance): quote about 10 CU/h in the confirmation, then read `rate` from the `start OK` line.
 
 ### `.secrets.json` fields
 
@@ -188,9 +188,10 @@ The first four are required by `start`; a missing one (or one that is still a `<
 
 | Field | Meaning |
 |---|---|
-| `api_key` | Any long random string you choose; written to the runtime's llama-server as the Bearer key and used by you to call `/v1` |
+| `api_key` | Any long random string you choose. It is written to `<root_dir>/.llama-api-key` on the runtime, and the notebook's internal calls and this repo's scripts send `Authorization: Bearer <api_key>` to `/v1`. **llama-server is started without `--api-key` / `--api-key-file` and does not check it**: any device on your tailnet that can reach `<service>.<tailnet>.ts.net:443` can call `/v1` and open the WebUI without a key, and when the file bridge is configured can also read, write, move and delete files under `novel_root` through the MCP proxy that `--ui-mcp-proxy` exposes. This is deliberate (WebUI and Magpie work key-less), so **the tailnet is the only gate and `api_key` is not access control today**. Before sharing your tailnet with anyone (shared devices, invited members, Funnel/Tunnel), restrict the ACL to your own devices, or add `--api-key-file` back to llama-server (see [`references/secure-remote-service.md`](references/secure-remote-service.md)) and turn the file bridge off |
 | `ts_client_id`, `ts_client_secret` | Tailscale OAuth client credentials (Auth Keys: Write only, tag `tag:colab`) used to mint one-shot ephemeral auth keys at runtime |
-| `tailnet_fqdn` | Service address, `qwen.<YOUR_TAILNET>.ts.net` (`qwen` is the Service name you created) |
+| `tailnet_fqdn` | Service address, `qwen.<YOUR_TAILNET>.ts.net`; its first label is the Service name you created (default `qwen`) |
+| `service_name` | Optional, default `qwen`. The runtime publishes the Tailscale Service `svc:<service_name>`; when you rename it, the Service you created in Tailscale, the `svc:...` in the ACL and the first label of `tailnet_fqdn` must all match, otherwise generating the notebook fails before any weights are downloaded |
 | `local_tailscale_ip` | Optional. Tailscale IP of the machine running `local_novel_mcp.py` (the WebUI file bridge). When unset the generated notebook skips the local file bridge entirely (no tunnel thread, no `local_novel_fs` entry in the WebUI) |
 | `*_drive_id` (one per active model) | Optional. Drive file ID of that model's notebook, needed only for `--sync-colab`; `colab_kernel.py` resolves and writes it back from the local Drive client database when generating |
 | `webui_system_prompt` | Optional. Default system prompt written into the WebUI config; empty (none) by default |
@@ -198,7 +199,7 @@ The first four are required by `start`; a missing one (or one that is still a `<
 | `novel_root` | Optional. Local directory `local_novel_mcp.py` exposes to the WebUI; default `~/Documents/colab-novel`, `~` is expanded |
 | `browsermcp_bridge` | Optional. Path of a BrowserMCP bridge script, the first browser-driver tier of the fallback track; unset means Playwriter / playwright-cli directly |
 
-The `<YOUR_...>` values in the example file are placeholders, not usable values; the last four optional keys are not in the example file, add them when needed. Each field can also come from an environment variable: `LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, `LOCAL_TAILSCALE_IP`, plus `G4HUIHUI_DRIVE_ID`, `GEMMA31B_DRIVE_ID`, `RVN27B_DRIVE_ID`, `GLM53_DRIVE_ID`, `WEBUI_SYSTEM_PROMPT`, `COLAB_NOTEBOOKS_DIR`, `NOVEL_ROOT`, `COLAB_BROWSERMCP_BRIDGE`. Resolution order is `.secrets.json`, then environment, then a placeholder (empty for optional settings). Other tunables:
+The `<YOUR_...>` values in the example file are placeholders, not usable values; the optional keys (`service_name` and after) are not in the example file, add them when needed; an optional key written as `""` counts as unset. Each field can also come from an environment variable: `LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, `LOCAL_TAILSCALE_IP`, plus `G4HUIHUI_DRIVE_ID`, `GEMMA31B_DRIVE_ID`, `RVN27B_DRIVE_ID`, `GLM53_DRIVE_ID`, `WEBUI_SYSTEM_PROMPT`, `COLAB_NOTEBOOKS_DIR`, `NOVEL_ROOT`, `COLAB_BROWSERMCP_BRIDGE`. Resolution order is `.secrets.json`, then environment, then a placeholder (empty for optional settings). Other tunables:
 
 | Variable | Effect |
 |---|---|
@@ -211,11 +212,12 @@ The `<YOUR_...>` values in the example file are placeholders, not usable values;
 ### Command cheat sheet
 
 ```bash
-python -X utf8 scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]   # run in the background
-python -X utf8 scripts/colab_cli.py launch [<slug>]       # detached start (reads the private build in notebooks/; generate it first with colab_kernel.py <slug>)
+python -X utf8 scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail] [--skip-preflight]   # run in the background
+python -X utf8 scripts/colab_cli.py launch [<slug>] [--skip-preflight]   # detached start (reads the private build in notebooks/private/, else notebooks/; generate it first with colab_kernel.py <slug>)
 python -X utf8 scripts/colab_cli.py verify [<slug>]       # rerun the verify cell only
 python -X utf8 scripts/colab_cli.py status                # balance, burn rate, sessions, heartbeat & idle-guard state
-python -X utf8 scripts/colab_cli.py stop [<slug> | --all] # release; for unnamed [?] sessions tries the Colab-yoga bridge first, then colab_sync
+python -X utf8 scripts/colab_cli.py stop <slug>           # stop that one session only
+python -X utf8 scripts/colab_cli.py stop --all            # release every assignment on the account; for unnamed [?] sessions tries the Colab-yoga bridge first, then colab_sync
 python -X utf8 scripts/colab_cli.py yoga [gui | wake | status | stop]   # optional Colab-yoga interop (old name easycolab still works)
 
 python -X utf8 scripts/colab_kernel.py --list             # active and archived models
@@ -233,12 +235,12 @@ Fallback track (browser sync): `python -X utf8 scripts/make_g4_huihui_v2_noteboo
 
 [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) is the companion Windows tray GPU manager. It manages the LLM service only (llama-server :8081, the Web UI, Magpie and the MCP file bridge; no video, image or ComfyUI), and chat traffic never passes through it. What it manages is the GPU: how much CU was spent, which model is running, whether each way in works, and that the runtime stays alive only as long as it is used. Waking it never kills the `llama-server` on `:8081` or the MCP forwarder; it only replaces its own older server process. It installs to `%LOCALAPPDATA%\Programs\Colab-yoga` (`Colab-yoga.exe`, `runtime\python.exe`, `bridge\colab_yoga_bridge.py`).
 
-Division of labour: start and switch models with this repo's `colab_cli.py start`; the tray app Colab-yoga is for viewing, extending, switching and releasing. Running `colab_cli.py start` first and waking Colab-yoga afterwards, or the other way round, reuses the same G4 through `~/.config/colab-cli/sessions.json`.
+Division of labour: new instance or new model -> this repo's `colab_cli.py start`; switching between already exported models, extending, viewing, releasing -> the Colab-yoga tray. Its agent skill is in the Colab-yoga repo under `skills/colab-yoga` and needs a separate install; every active model is built for a G4 (about 96 GB of VRAM). Running `colab_cli.py start` first and waking Colab-yoga afterwards, or the other way round, reuses the same G4 through `~/.config/colab-cli/sessions.json`. When `start` reuses somebody else's session (Colab-yoga's, say), a failure is reported and that session is left running; `yoga wake` counts as successful only when the bridge output contains a `WAKE_URL:` line, otherwise no keep-alive is started. The heartbeat also reads Colab-yoga's `/api/status` inside the VM: a download or VRAM load in progress, or an idle countdown that was extended, counts as activity and postpones this repo's idle stop.
 
 **Make Colab-yoga see this repo's models (runners, three fixed steps):**
 
-1. Install Colab-yoga to `%LOCALAPPDATA%\Programs\Colab-yoga`; or unzip it elsewhere and set the `COLAB_YOGA_DIR` environment variable to that folder (reopen the terminal afterwards).
-2. Run `python -X utf8 scripts/colab_kernel.py --all`; the output must contain a line `Exported Colab-yoga runners to: <path>`. `skipped exporting runners` means the directory is wrong.
+1. Install Colab-yoga to `%LOCALAPPDATA%\Programs\Colab-yoga` (`"$LOCALAPPDATA/Programs/Colab-yoga"` in Git Bash); or unzip it elsewhere and set the `COLAB_YOGA_DIR` environment variable to that folder (a user-level variable only reaches processes started afterwards; the current agent process can `export COLAB_YOGA_DIR=...`). `COLAB_YOGA_DIR` wins over the default.
+2. Run `python -X utf8 scripts/colab_kernel.py --all`; the output must contain a line `Exported Colab-yoga runners to: <path>`. `skipped exporting runners` means the directory is wrong; `Refused to export Colab-yoga runners: missing ...` (exit code 1) means one of the four required values is unset, fix `.secrets.json` / the environment first, no runners with placeholders are written.
 3. Re-run step 2 after editing `.secrets.json` (keys, tailnet, file-bridge IP, system prompt): the values inside the runners were baked in when it was generated. `colab_kernel_runners.json` holds real keys, never commit it.
 
 `colab_cli.py yoga ...` reports the expected install location when it cannot find the app, and `COLAB_YOGA_DIR` points it at a custom directory.
@@ -248,8 +250,9 @@ Division of labour: start and switch models with this repo's `colab_cli.py start
 | Symptom | Fix |
 |---|---|
 | `missing ... in .secrets.json / environment` | The four required fields are empty or still the `<YOUR_...>` placeholders from the example file; fill them in per the table above. This check runs before any GPU is allocated |
-| `colab` is not recognized / `command not found` | uv's tool directory is not on PATH: run `uv tool update-shell`, then **close and reopen the terminal**; if it is still missing, `uv tool dir --bin` shows the directory to add to PATH by hand |
-| `colab sessions` / `colab usage` hangs or asks for authorization | Not authorized, or the token expired; it is waiting on `input()` for the pasted code. Have a person run `colab sessions` in their own terminal, or use the Colab-yoga bridge `auth_url` / `auth_code` two steps; an agent should not retry without an interactive stdin |
+| `colab CLI not found` / `colab` is not recognized | The scripts already look in `~/.local/bin` and `uv tool dir --bin`; if this still shows, it is not installed: `python -m pip install uv && python -m uv tool install "google-colab-cli==0.7.5"`, no terminal restart needed |
+| `colab CLI is not authorized ...` | Not authorized, or the token expired (the scripts close stdin, so it fails at once instead of hanging). Give the link in the message to a person, who runs `colab sessions` in their own terminal, or use the Colab-yoga bridge `auth_url` / `auth_code` two steps; an agent should not wait on input itself |
+| `preflight failed, nothing was allocated` | The local pre-boot check failed: fix the listed items (the CLI's `pythonw.exe`, Tailscale online on this PC, Tailscale OAuth credentials); add `--skip-preflight` only when you know better |
 | `UnicodeEncodeError` | The console is not UTF-8: always run `python -X utf8 scripts/...` (the entry points also force UTF-8 now); `start` releases the instance it created on any unexpected error after allocation, but still verify with `status` |
 | `Colab-yoga not found at ...` | The optional component is not installed: install Colab-yoga as the message says, or set `COLAB_YOGA_DIR`; core commands are unaffected |
 | `skipped exporting runners` | The Colab-yoga directory does not exist or is not the one `COLAB_YOGA_DIR` names; redo the three runners steps above until `Exported Colab-yoga runners to:` appears |
@@ -260,7 +263,7 @@ Division of labour: start and switch models with this repo's `colab_cli.py start
 
 The full runbook, including how to onboard a model, is in [`SKILL.md`](SKILL.md) section 7 onward.
 
-The notebooks committed to the public repository under `notebooks/` are **sanitized builds** (placeholders only). Running `make_*_notebook.py` locally writes your private build to `notebooks/*.ipynb` (same file name as the committed sanitized one); before pushing to a public remote, always regenerate into the staging tree with `--sanitized --output-dir`, and check `git status` to make sure no private build is staged.
+The notebooks committed to the public repository under `notebooks/` are **sanitized builds** (placeholders only). Running `make_*_notebook.py` or `colab_kernel.py` locally writes your private build to `notebooks/private/`, which `.gitignore` excludes, so the committed sanitized files are not overwritten (a skills directory is a `git clone`, and overwriting them would block a later `git pull`); `--sanitized` writes to `notebooks/`, `--output-dir` moves either. Before pushing to a public remote, still check `git status` to make sure no private build is staged.
 
 ### Sanitized builds
 
@@ -298,13 +301,13 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 | `references/` | per-model notes, CU budget, Tailscale and remote-access guides |
 | `archive/multi-model-kernel/` | frozen multi-model kernel, generators and notes (122B, Nemotron, Gemma) |
 | `debug-runs/` | 2026-11-07 T4 control/heartbeat A/B and G4 soak logs |
-| `notebooks/` | sanitized generated notebooks |
+| `notebooks/` | sanitized generated notebooks; `notebooks/private/` (git-ignored) holds your local private builds |
 | `.secrets.example.json` | config template |
 
 ## Security notes
 
 - `.secrets.json` and `.colab-meter-state.json` are listed in `.gitignore`. Verify with `git status` before the first push.
-- Generated notebooks embed the API key and Tailscale OAuth secret, because the runtime needs them. Never commit or share a notebook built without `--sanitized`. A private build is written only to this repo's `notebooks/` by default; mirroring it into Google Drive is opt-in (`notebooks_dir` in `.secrets.json`, the `COLAB_NOTEBOOKS_DIR` variable, or `--mirror-drive`) and the mirrored copy holds the same secrets. Run `git status` after every private build.
+- Generated notebooks embed the API key and Tailscale OAuth secret, because the runtime needs them. Never commit or share a notebook built without `--sanitized`. A private build is written only to this repo's git-ignored `notebooks/private/` by default; mirroring it into Google Drive is opt-in (`notebooks_dir` in `.secrets.json`, the `COLAB_NOTEBOOKS_DIR` variable, or `--mirror-drive`) and the mirrored copy holds the same secrets. Run `git status` after every private build.
 - `colab_kernel_runners.json` (the headless cell 1 exported for Colab-yoga) also holds real keys; never commit or share it.
 - Use an OAuth client scoped to auth-key creation with `tag:colab` only, and rotate it if a non-sanitized notebook ever leaves your machine.
 - A tailnet-only service relies on WireGuard identity for isolation. Public exposure needs an application-layer API key.

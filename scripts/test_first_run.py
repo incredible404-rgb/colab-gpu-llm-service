@@ -104,6 +104,7 @@ class PlaceholderTests(unittest.TestCase):
         cell = 'KEY = "real"\nLOCAL = "<YOUR_LOCAL_TAILSCALE_IP>"\n'
         with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'q.ts.net', 'api_key': 'k'}), \
                 mock.patch.object(colab_cli, 'notebook_first_cell', return_value=cell), \
+                mock.patch.object(colab_cli, 'preflight'), \
                 mock.patch.object(colab_cli, 'usage', side_effect=RuntimeError('past the placeholder check')):
             with self.assertRaises(RuntimeError):
                 colab_cli.cmd_launch(SLUG, 'G4', 45)
@@ -114,9 +115,12 @@ class StartReleasesTests(unittest.TestCase):
         stopped = []
         with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'q.ts.net', 'api_key': 'k'}), \
                 mock.patch.object(colab_cli, 'headless_setup', return_value='print(1)\n'), \
+                mock.patch.object(colab_cli, 'preflight'), \
                 mock.patch.object(colab_cli, 'usage', return_value={'balance': 100.0, 'rate': 0.0, 'active': 0}), \
                 mock.patch.object(colab_cli, '_ensure_session', return_value=created), \
                 mock.patch.object(colab_cli, 'start_keepalive'), \
+                mock.patch.object(colab_cli, '_keepalive_running', return_value=False), \
+                mock.patch.object(colab_cli, 'stop_keepalive', side_effect=lambda s: self.daemons_stopped.append(s)), \
                 mock.patch.object(colab_cli, 'exec_stream', side_effect=exec_error), \
                 mock.patch.object(colab_cli, 'cmd_stop', side_effect=lambda names: stopped.append(names)), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -125,6 +129,9 @@ class StartReleasesTests(unittest.TestCase):
             except BaseException as err:
                 return stopped, err
         return stopped, None
+
+    def setUp(self):
+        self.daemons_stopped = []
 
     def test_unicode_error_after_allocation_releases_the_new_runtime(self):
         err = UnicodeEncodeError('cp1252', '\u4e2d', 0, 1, 'character maps to <undefined>')
@@ -141,6 +148,7 @@ class StartReleasesTests(unittest.TestCase):
         stopped, raised = self._start(created=False, exec_error=RuntimeError('boom'))
         self.assertIsInstance(raised, RuntimeError)
         self.assertEqual(stopped, [])
+        self.assertEqual(self.daemons_stopped, [SLUG])  # only the keep-alive daemon this start launched goes
 
     def test_keep_on_fail_keeps_the_runtime(self):
         stopped, raised = self._start(created=True, keep_on_fail=True, exec_error=RuntimeError('boom'))
@@ -156,6 +164,7 @@ class StartReleasesTests(unittest.TestCase):
         stopped = []
         with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'q.ts.net', 'api_key': 'k'}), \
                 mock.patch.object(colab_cli, 'notebook_first_cell', return_value='print(1)\n'), \
+                mock.patch.object(colab_cli, 'preflight'), \
                 mock.patch.object(colab_cli, 'usage', return_value={'balance': 1.0, 'rate': 0.0, 'active': 0}), \
                 mock.patch.object(colab_cli, '_ensure_session', return_value=True), \
                 mock.patch.object(colab_cli, 'start_keepalive', side_effect=ValueError('boom')), \

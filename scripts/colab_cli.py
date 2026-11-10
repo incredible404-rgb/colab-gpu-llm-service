@@ -1,7 +1,7 @@
 """Run the unified kernel's models through the official Colab CLI (google-colab-cli), no browser tab.
 
-  python scripts/colab_cli.py start     [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
-  python scripts/colab_cli.py launch    [<slug>] [--gpu G4] [--idle-min 45]
+  python scripts/colab_cli.py start     [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail] [--skip-preflight]
+  python scripts/colab_cli.py launch    [<slug>] [--gpu G4] [--idle-min 45] [--skip-preflight]
   python scripts/colab_cli.py verify    [<slug>]
   python scripts/colab_cli.py yoga      [gui | wake | status | stop] [--gpu G4] [--idle-min 45]   (alias: easycolab)
   python scripts/colab_cli.py status
@@ -9,7 +9,7 @@
 
 start reuses colab_kernel.build_notebook_dict, so the CLI path and the notebook path run the same
 cell-1 code; the notebook's frontend-only tail (banner, WebUI popup, stop button) is cut off.
-launch reads that same cell from notebooks/<model>.ipynb (it does not rebuild it), execs it in
+launch reads that same cell from notebooks/private/<model>.ipynb, else notebooks/<model>.ipynb (it does not rebuild it), execs it in
 the kernel with LAUNCH_DETACHED=1, and polls http://<tailnet>:443/health until 200.
 The Tailscale service is raw TCP to llama-server, so HTTPS on that name never completes.
 
@@ -42,8 +42,9 @@ already uses start_new_session=True.
 Colab Secrets and drive.mount() do not work in CLI sessions; the kernel downloads from pinned Hugging Face
 revisions and reads HF_TOKEN from the environment first, so a local HF_TOKEN is forwarded when present.
 The colab CLI must be authorized once, by a person at a terminal: `colab sessions` prints the OAuth URL and
-waits on input() for the pasted code (token in ~/.config/colab-cli/token.json). An agent without an
-interactive stdin hangs there. Its DEBUG log ~/.config/colab-cli/colab.log records executed code,
+waits on input() for the pasted code (token in ~/.config/colab-cli/token.json). Every colab call here runs
+with stdin closed, so an unauthorized CLI fails at once with a one-line "not authorized" message instead of
+hanging. Its DEBUG log ~/.config/colab-cli/colab.log records executed code,
 which includes the same credentials the generated notebooks already carry.
 
 Run it as `python -X utf8 scripts/colab_cli.py ...`; main() also forces UTF-8 on stdout/stderr, so a console
@@ -54,6 +55,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +64,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from colab_path import INSTALL_HINT, find_colab  # noqa: E402
 from stdio_utf8 import force_utf8  # noqa: E402
 
 # `status` and `stop` are the commands run most often and need none of these: requests alone is ~170 ms of
@@ -90,14 +93,39 @@ KEEPALIVE = Path(__file__).with_name('colab_keepalive.py')
 # Not exported by subprocess on every Python build. Win32 CREATE_BREAKAWAY_FROM_JOB.
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 NOTEBOOKS = Path(__file__).resolve().parents[1] / 'notebooks'
+PRIVATE_NOTEBOOKS = NOTEBOOKS / 'private'  # default output of a private build; git-ignored
+
+
+_AUTH_MARKERS = ('Enter the authorization code', 'To authorize colab-cli')
+
+
+def _as_text(value) -> str:
+    return value.decode('utf-8', 'replace') if isinstance(value, bytes) else (value or '')
+
+
+def unauthorized_hint(output: str) -> str | None:
+    """One-line message when the CLI's output shows it is waiting for the first OAuth code, else None."""
+    if not any(marker in output for marker in _AUTH_MARKERS):
+        return None
+    url = re.search(r'https://accounts\.google\.com/\S+', output)
+    return ('colab CLI is not authorized: a person must run `colab sessions` once in their own terminal and paste '
+            'the code Google shows (SKILL.md section 0, first authorization)' + ('. Link: ' + url.group(0) if url else ''))
 
 
 def colab(*args, check=True, timeout=180):
-    r = subprocess.run(['colab', *args], env=ENV, timeout=timeout, text=True, encoding='utf-8',
-                       errors='replace', capture_output=True)
+    """Run the colab CLI. stdin is closed: an unauthorized CLI would otherwise wait on input() until the timeout."""
+    try:
+        r = subprocess.run([find_colab(), *args], env=ENV, timeout=timeout, text=True, encoding='utf-8',
+                           errors='replace', capture_output=True, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise SystemExit('colab CLI not found (not on PATH, not in the uv tool bin directory). Install: ' + INSTALL_HINT)
+    except subprocess.TimeoutExpired as err:
+        hint = unauthorized_hint(_as_text(err.stdout) + _as_text(err.stderr))
+        raise SystemExit(hint or 'colab %s timed out after %ds' % (' '.join(args), timeout))
+    out = (r.stdout or '') + (r.stderr or '')
     if check and r.returncode != 0:
-        raise SystemExit('colab %s failed (%d):\n%s' % (' '.join(args), r.returncode, (r.stdout or '') + (r.stderr or '')))
-    return (r.stdout or '') + (r.stderr or '')
+        raise SystemExit(unauthorized_hint(out) or 'colab %s failed (%d):\n%s' % (' '.join(args), r.returncode, out))
+    return out
 
 
 def sessions() -> list[str]:
@@ -119,8 +147,9 @@ def exec_stream(session: str, code: str, timeout_s: int) -> int:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
             f.write(code)
         # colab exec gives up after 30 s by default, far short of a model download
-        proc = subprocess.Popen(['colab', 'exec', '-s', session, '-f', path, '--timeout', str(timeout_s)], env=ENV, text=True,
-                                encoding='utf-8', errors='replace', stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        proc = subprocess.Popen([find_colab(), 'exec', '-s', session, '-f', path, '--timeout', str(timeout_s)], env=ENV,
+                                text=True, encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout_s
         for line in proc.stdout:
             print(line, end='', flush=True)
@@ -215,7 +244,7 @@ def start_keepalive(session: str, idle_min: int):
     if st:
         (CLI_DIR / ('keepalive-%s.json' % session)).unlink(missing_ok=True)
     if not CLI_PYTHONW.exists():
-        raise SystemExit('colab CLI interpreter not found at %s (install with: uv tool install google-colab-cli)' % CLI_PYTHONW)
+        raise SystemExit('colab CLI interpreter not found at %s (install with: %s)' % (CLI_PYTHONW, INSTALL_HINT))
     flags = (getattr(subprocess, 'DETACHED_PROCESS', 0)
              | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
              | CREATE_BREAKAWAY_FROM_JOB)
@@ -320,6 +349,76 @@ def _config():
     return config
 
 
+def _tailscale_exe() -> str | None:
+    found = shutil.which('tailscale')
+    if found:
+        return found
+    for var in ('ProgramFiles', 'ProgramW6432'):
+        base = os.environ.get(var)
+        cand = Path(base) / 'Tailscale' / 'tailscale.exe' if base else None
+        if cand and cand.is_file():
+            return str(cand)
+    return None
+
+
+def _local_tailscale_problem() -> str | None:
+    """Why this PC is not on the tailnet, or None. Without it /health and /slots can never be reached."""
+    exe = _tailscale_exe()
+    if not exe:
+        return 'tailscale CLI not found on this PC (install Tailscale and sign in)'
+    try:
+        r = subprocess.run([exe, 'status', '--json'], capture_output=True, text=True, encoding='utf-8', errors='replace',
+                           timeout=20, stdin=subprocess.DEVNULL)
+        state = json.loads(r.stdout or '{}').get('BackendState')
+    except (OSError, subprocess.SubprocessError, ValueError) as err:
+        return 'could not read `tailscale status` (%s)' % type(err).__name__
+    if state != 'Running':
+        return 'Tailscale on this PC is %s, not Running (open Tailscale and sign in)' % (state or 'unknown')
+    return None
+
+
+def _tailscale_oauth_problem(config: dict) -> str | None:
+    """Ask Tailscale for an OAuth token with the configured client, as cell 1 will. Never prints the credentials.
+
+    Only a definite rejection counts. A network error from this PC proves nothing about the VM's route.
+    """
+    import requests
+    try:
+        r = requests.post('https://api.tailscale.com/api/v2/oauth/token', timeout=15,
+                          data={'client_id': config['ts_client_id'], 'client_secret': config['ts_client_secret']})
+    except requests.RequestException as err:
+        print('[colab_cli] preflight: could not reach api.tailscale.com from this PC (%s); not treated as a failure'
+              % type(err).__name__, flush=True)
+        return None
+    try:
+        token = r.json().get('access_token')
+    except ValueError:
+        token = None
+    if r.status_code == 200 and token:
+        return None
+    return ('Tailscale rejected the OAuth client (HTTP %d): check ts_client_id / ts_client_secret in .secrets.json '
+            'and that the client may write Auth Keys for tag:colab' % r.status_code)
+
+
+def preflight(config: dict, skip: bool = False) -> None:
+    """Local checks that otherwise show up only after the G4 is billing. Raises SystemExit before anything is allocated."""
+    if skip:
+        print('[colab_cli] preflight skipped (--skip-preflight)', flush=True)
+        return
+    problems = []
+    if not CLI_PYTHONW.exists():
+        problems.append('colab CLI interpreter not found at %s (the keep-alive daemon runs on it); install: %s'
+                        % (CLI_PYTHONW, INSTALL_HINT))
+    for check in (_local_tailscale_problem, lambda: _tailscale_oauth_problem(config)):
+        problem = check()
+        if problem:
+            problems.append(problem)
+    if problems:
+        raise SystemExit('preflight failed, nothing was allocated:\n  - %s\n(--skip-preflight overrides these checks)'
+                         % '\n  - '.join(problems))
+    print('[colab_cli] preflight ok (CLI interpreter, Tailscale online, Tailscale OAuth client)', flush=True)
+
+
 def _cells(slug: str, config: dict) -> dict:
     from colab_kernel import ALL_MODELS, build_notebook_dict
     nb = build_notebook_dict(ALL_MODELS[slug], config, with_switch=False)
@@ -348,12 +447,23 @@ def headless_setup(slug: str, config: dict, idle_min: int) -> str:
     return prefix + setup
 
 
-def notebook_first_cell(slug: str) -> str:
-    """First code cell of notebooks/<model>.ipynb, frontend tail removed. Does not rebuild the kernel."""
+def notebook_path(slug: str) -> Path:
+    """The private build in notebooks/private/ when there is one, else notebooks/ (older private builds and the
+    committed sanitized notebooks live there). The path returned for a missing file is the private one."""
     from colab_kernel import ALL_MODELS
-    path = NOTEBOOKS / ALL_MODELS[slug]['notebook']
+    name = ALL_MODELS[slug]['notebook']
+    for folder in (PRIVATE_NOTEBOOKS, NOTEBOOKS):
+        if (folder / name).exists():
+            return folder / name
+    return PRIVATE_NOTEBOOKS / name
+
+
+def notebook_first_cell(slug: str) -> str:
+    """First code cell of the model's notebook (see notebook_path), frontend tail removed. Does not rebuild the kernel."""
+    path = notebook_path(slug)
     if not path.exists():
-        raise SystemExit('notebook not found: %s' % path)
+        raise SystemExit('notebook not found: %s; generate a private build first with: '
+                         'python -X utf8 scripts/colab_kernel.py %s' % (path, slug))
     nb = json.loads(path.read_text(encoding='utf-8'))
     for cell in nb.get('cells') or []:
         if cell.get('cell_type') != 'code':
@@ -420,22 +530,53 @@ def _ensure_session(slug: str, gpu: str) -> bool:
     return True
 
 
-def cmd_launch(slug: str, gpu: str, idle_min: int):
+def _keepalive_running(session: str) -> bool:
+    st = keepalive_state(session)
+    return bool(st and _pid_alive(int(st.get('pid') or 0)))
+
+
+def _abandon(slug: str, state: dict, reason: str, keep: bool = False) -> None:
+    """Failure path shared by start and launch; runs at most once per command.
+
+    Only a runtime this command allocated (state['created']) is released. A reused session, such as the one
+    Colab-yoga owns, keeps running: the failure is reported, and only a keep-alive daemon started here is
+    taken down again so its idle guard cannot later stop somebody else's session.
+    """
+    if state.get('released') or keep or not state.get('ensured'):
+        return  # nothing to undo before the session exists
+    state['released'] = True
+    if state.get('created'):
+        print('[colab_cli] %s; releasing the runtime so a failed run does not keep burning CU' % reason, flush=True)
+        cmd_stop([slug])
+        return
+    print('[colab_cli] %s; the reused session %s keeps running (stop it with: stop %s)' % (reason, slug, slug), flush=True)
+    if state.get('keepalive_started'):
+        stop_keepalive(slug)
+
+
+def _begin_keepalive(slug: str, idle_min: int, state: dict) -> None:
+    state['keepalive_started'] = not _keepalive_running(slug)
+    start_keepalive(slug, idle_min)
+
+
+def cmd_launch(slug: str, gpu: str, idle_min: int, skip_preflight: bool = False):
     """new --gpu, start the TFE daemon, exec the notebook's first cell in the kernel, poll /health.
 
-    An unexpected exception after this call allocated the runtime releases it (same rule as cmd_start).
+    Every failure after this call allocated the runtime releases it, whether it comes back as a return code
+    or as an exception including Ctrl-C (same rule as cmd_start). A session that was reused is left running.
     """
-    state = {'created': False}
+    state = {'created': False, 'ensured': False, 'released': False, 'keepalive_started': False}
     try:
-        return _cmd_launch(slug, gpu, idle_min, state)
-    except Exception as err:
-        if state['created']:
-            print('[colab_cli] unexpected %s; releasing the runtime this launch allocated' % type(err).__name__, flush=True)
-            cmd_stop([slug])
+        rc = _cmd_launch(slug, gpu, idle_min, state, skip_preflight)
+    except BaseException as err:
+        _abandon(slug, state, 'unexpected %s' % type(err).__name__)
         raise
+    if rc:
+        _abandon(slug, state, 'launch failed')
+    return rc
 
 
-def _cmd_launch(slug: str, gpu: str, idle_min: int, state: dict):
+def _cmd_launch(slug: str, gpu: str, idle_min: int, state: dict, skip_preflight: bool = False):
     import requests
     from colab_kernel import ALL_MODELS
     config = _config()
@@ -448,7 +589,8 @@ def _cmd_launch(slug: str, gpu: str, idle_min: int, state: dict):
             'notebook %s still holds sanitized <YOUR_...> placeholders (%s); '
             'generate a private build first with: python -X utf8 scripts/colab_kernel.py %s' % (
                 ALL_MODELS[slug]['notebook'], ', '.join(stale), slug))
-    # svc:qwen publishes raw TCP :443 to llama-server. HTTPS on that name never returns 200.
+    preflight(config, skip_preflight)
+    # The Tailscale Service publishes raw TCP :443 to llama-server. HTTPS on that name never returns 200.
     health = 'http://%s:443/health' % config['tailnet_fqdn']
     before = usage()
     info = {'balance_before': before['balance'], 'active_before': before['active']}
@@ -458,16 +600,17 @@ def _cmd_launch(slug: str, gpu: str, idle_min: int, state: dict):
     info['assign_begin'] = time.time()
     print('[colab_cli] assign_begin epoch=%.3f wall=%s' % (info['assign_begin'], time.strftime('%Y-%m-%d %H:%M:%S')), flush=True)
     state['created'] = _ensure_session(slug, gpu)
+    state['ensured'] = True
     assign_s = time.monotonic() - t_assign
     info['assign_s'] = assign_s
     info['assign_done'] = time.time()
     print('[colab_cli] assign_done %.1fs epoch=%.3f wall=%s' % (assign_s, info['assign_done'], time.strftime('%Y-%m-%d %H:%M:%S')), flush=True)
     t0 = time.monotonic()
     try:
-        start_keepalive(slug, idle_min)
+        _begin_keepalive(slug, idle_min, state)
     except SystemExit as err:
-        print('[colab_cli] %s; releasing %s so it does not keep burning CU' % (err, slug), flush=True)
-        cmd_stop([slug])
+        print('[colab_cli] %s' % err, flush=True)
+        _abandon(slug, state, 'keep-alive failed')
         raise
     t_exec = time.monotonic()
     rc = exec_stream(slug, cell_exec_code, timeout_s=3600)
@@ -523,25 +666,22 @@ def remote_check(config: dict, slug: str) -> bool:
     return False
 
 
-def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bool):
+def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bool, skip_preflight: bool = False):
     config = _config()
     code = headless_setup(slug, config, idle_min)
+    preflight(config, skip_preflight)
     before = usage()
     print('[colab_cli] balance %.2f CU, %d active' % (before['balance'] or 0, before['active']), flush=True)
-    created = _ensure_session(slug, gpu)
-    released = False
+    state = {'created': False, 'ensured': False, 'released': False, 'keepalive_started': False}
+    state['created'] = _ensure_session(slug, gpu)
+    state['ensured'] = True
 
     def release(reason: str):
-        nonlocal released
-        if released or keep_on_fail:
-            return
-        released = True
-        print('[colab_cli] %s; releasing the runtime so a failed start does not keep burning CU' % reason, flush=True)
-        cmd_stop([slug])
+        _abandon(slug, state, reason, keep=keep_on_fail)
 
     try:
         try:
-            start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
+            _begin_keepalive(slug, idle_min, state)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
         except SystemExit as err:
             print('[colab_cli] %s' % err, flush=True)
             release('keep-alive failed')
@@ -561,11 +701,7 @@ def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bo
         # Anything unexpected after the runtime exists (UnicodeEncodeError on a console, a dead network,
         # Ctrl-C) must not strand a billed G4. Only a runtime this call allocated is released; a reused one
         # (for example Colab-yoga's) keeps running and is reported instead.
-        if created:
-            release('unexpected %s' % type(err).__name__)
-        elif not released:
-            print('[colab_cli] unexpected %s; the reused session %s keeps running (stop it with: stop %s)' % (
-                type(err).__name__, slug, slug), flush=True)
+        release('unexpected %s' % type(err).__name__)
         raise
 
 
@@ -657,9 +793,15 @@ def cmd_stop(names: list[str]):
         if u['active'] == 0 and not u['rate']:
             break
         time.sleep(3)
-    if u['active'] and (stop_all or '?' in sessions()):
+    if u['active'] and stop_all:
         # Assignments the CLI has no local name for ("[?]") cannot be stopped by name.
         u = _release_leftovers(u)
+    elif u['active']:
+        # Stopping one name never escalates: _release_leftovers frees the whole account, Colab-yoga's session
+        # included. Say what is left and how to clear it on purpose.
+        print('[colab_cli] %d assignment(s) still active after stopping %s (another session, or an unnamed [?] ghost). '
+              '`stop --all` releases every assignment on the account, so run it only when none of them is wanted.'
+              % (u['active'], ', '.join(named) or 'nothing'), flush=True)
     print('Active assignments: %d | Burn rate: %.2f CU/h | Balance: %.2f CU' % (u['active'], u['rate'] or 0, u['balance'] or 0))
     return 0 if u['active'] == 0 else 1
 
@@ -674,6 +816,21 @@ YOGA_BRIDGE = YOGA_DIR / 'bridge/colab_yoga_bridge.py'
 # Name under which the Colab-yoga bridge registers its session in ~/.config/colab-cli/sessions.json.
 # Its current build still writes 'easycolab' (an inherited string, not an install path); both are accepted.
 YOGA_SESSION_NAMES = ('colab-yoga', 'easycolab')
+
+
+def run_streamed(argv: list[str]) -> tuple[int, str]:
+    """Run argv with output echoed live and also returned (the bridge wake takes minutes; the log must not wait)."""
+    proc = subprocess.Popen(argv, env=ENV, text=True, encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    lines = []
+    for line in proc.stdout:
+        print(line, end='', flush=True)
+        lines.append(line)
+    return proc.wait(), ''.join(lines)
+
+
+def wake_succeeded(text: str) -> bool:
+    return any(line.strip().startswith('WAKE_URL:') for line in (text or '').splitlines())
 
 
 def cmd_yoga(rest: list[str]) -> int:
@@ -697,13 +854,18 @@ def cmd_yoga(rest: list[str]) -> int:
     if sub == 'wake':
         gpu = opt('--gpu', 'G4')
         idle_min = int(opt('--idle-min', 45))
-        rc = subprocess.run([str(YOGA_PY), '-u', str(YOGA_BRIDGE), 'wake', '--gpu', gpu], env=ENV).returncode
-        if rc == 0:
-            active = [s for s in sessions() if s != '?']
-            target = next((n for n in YOGA_SESSION_NAMES if n in active), active[0] if active else None)
-            if target:
-                start_keepalive(target, idle_min)
-        return rc
+        rc, text = run_streamed([str(YOGA_PY), '-u', str(YOGA_BRIDGE), 'wake', '--gpu', gpu])
+        # The bridge's wrapper exits 0 even when the wake failed (it prints WAKE_ERROR: ...), so success is the
+        # WAKE_URL: line it prints once the server is up. A bridge that also returns non-zero on failure is fine.
+        if rc != 0 or not wake_succeeded(text):
+            print('[colab_cli] yoga wake did not report WAKE_URL; no keep-alive started. If a runtime was allocated, '
+                  'check `status` and stop it if unwanted.', flush=True)
+            return rc or 1
+        active = [s for s in sessions() if s != '?']
+        target = next((n for n in YOGA_SESSION_NAMES if n in active), active[0] if active else None)
+        if target:
+            start_keepalive(target, idle_min)
+        return 0
     raise SystemExit('unknown yoga action %s (expected: gui | wake | status | stop)' % sub)
 
 
@@ -725,9 +887,9 @@ def main(argv: list[str]):
         if cmd == 'verify':
             return cmd_verify(slug)
         if cmd == 'launch':
-            return cmd_launch(slug, opt('--gpu', 'G4'), int(opt('--idle-min', 45)))
+            return cmd_launch(slug, opt('--gpu', 'G4'), int(opt('--idle-min', 45)), '--skip-preflight' in rest)
         return cmd_start(slug, opt('--gpu', 'G4'), int(opt('--idle-min', 45)),
-                         '--no-verify' not in rest, '--keep-on-fail' in rest)
+                         '--no-verify' not in rest, '--keep-on-fail' in rest, '--skip-preflight' in rest)
     if cmd == 'status':
         return cmd_status()
     if cmd == 'stop':

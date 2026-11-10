@@ -64,7 +64,9 @@ class IdleTests(unittest.TestCase):
 
 class KernelBeatTests(unittest.TestCase):
     def test_beat_is_a_short_colab_exec(self):
-        self.assertEqual(ka.beat_argv('s', 'b.py'), ['colab', 'exec', '-s', 's', '-f', 'b.py', '--timeout', '60'])
+        argv = ka.beat_argv('s', 'b.py')
+        self.assertEqual(argv[1:], ['exec', '-s', 's', '-f', 'b.py', '--timeout', '60'])
+        self.assertEqual(argv[0], ka.find_colab())
         ast.parse(ka.BEAT_CODE)
         self.assertLessEqual(ka.BEAT_INTERVAL_S, 30)
         self.assertEqual(ka.PING_INTERVAL_S % ka.BEAT_INTERVAL_S, 0)
@@ -73,16 +75,16 @@ class KernelBeatTests(unittest.TestCase):
         real = subprocess.run
         try:
             subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a[0], 0, b'', b'')
-            self.assertEqual(ka.kernel_beat('s', 'b.py'), (True, 'rc0'))
+            self.assertEqual(ka.kernel_beat('s', 'b.py'), (True, 'rc0', ''))
             subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a[0], 1, b'', b'Session not found')
-            ok, detail = ka.kernel_beat('s', 'b.py')
+            ok, detail, _ = ka.kernel_beat('s', 'b.py')
             self.assertFalse(ok)
             self.assertIn('Session not found', detail)
 
             def boom(*a, **k):
                 raise subprocess.TimeoutExpired(a[0], 1)
             subprocess.run = boom
-            self.assertEqual(ka.kernel_beat('s', 'b.py'), (False, 'timeout'))
+            self.assertEqual(ka.kernel_beat('s', 'b.py'), (False, 'timeout', ''))
         finally:
             subprocess.run = real
 
@@ -153,7 +155,8 @@ class RefreshEndpointTests(unittest.TestCase):
 class DaemonLoopTests(unittest.TestCase):
     """Drive main() for a few simulated minutes with every outside call faked."""
 
-    def _run(self, *, log_preload=b'', idle_min=0.5, in_process=False):
+    def _run(self, *, log_preload=b'', idle_min=0.5, in_process=False, secrets_json=None, env_extra=None,
+             beat_fn=None, slots_error=None):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         home = Path(tmp.name)
@@ -180,6 +183,8 @@ class DaemonLoopTests(unittest.TestCase):
 
         slots = mock.Mock()
         slots.get.return_value.json.return_value = [{'is_processing': False, 'n_past': 5}]
+        if slots_error is not None:
+            slots.get.side_effect = slots_error
         sessions_created = []
 
         def make_session():
@@ -193,14 +198,19 @@ class DaemonLoopTests(unittest.TestCase):
             local_.token, local_.url = info.token, info.url
             local_.token_expires_at = object()
 
-        # main() reads <repo>/.secrets.json relative to __file__; point that at an empty scratch tree.
-        fake_file = str(home / 'repo/scripts/colab_keepalive.py')
-        with mock.patch.object(ka, '__file__', fake_file), \
+        # main() loads the config through secrets_config; point that at a scratch .secrets.json (or none).
+        secrets_file = home / 'repo/.secrets.json'
+        if secrets_json is not None:
+            secrets_file.parent.mkdir(parents=True)
+            secrets_file.write_text(json.dumps(secrets_json), encoding='utf-8')
+        env = {'TAILNET_FQDN': 'qwen.example.ts.net', 'LLAMA_API_KEY': 'k',
+               'COLAB_KEEPALIVE_BEAT': '' if in_process else 'exec', **(env_extra or {})}
+        with mock.patch.object(ka.secrets_config, 'SECRETS_FILE', secrets_file), \
              mock.patch('pathlib.Path.home', return_value=home), \
-             mock.patch.dict(os.environ, {'TAILNET_FQDN': 'qwen.example.ts.net', 'LLAMA_API_KEY': 'k',
-                                          'COLAB_KEEPALIVE_BEAT': '' if in_process else 'exec'}), \
+             mock.patch.dict(os.environ, env), \
              mock.patch.object(ka, '_import_colab', return_value=(Exception, lambda: fake_state, apply_proxy, None)), \
-             mock.patch.object(ka, 'kernel_beat', side_effect=lambda s, f: beats.append(clock['now']) or (True, 'rc0')), \
+             mock.patch.object(ka, 'kernel_beat', side_effect=lambda s, f: beats.append(clock['now']) or (
+                 beat_fn(len(beats)) if beat_fn else (True, 'rc0'))), \
              mock.patch.object(ka, '_stop_session', side_effect=lambda s, log: stops.append(s)), \
              mock.patch.object(ka.requests, 'Session', side_effect=make_session), \
              mock.patch.object(ka.requests, 'get', side_effect=AssertionError('slots must use the shared session')), \
@@ -538,13 +548,33 @@ class LaunchDetachTests(unittest.TestCase):
         stopped = []
         with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'qwen.ts.net', 'api_key': 'k'}), \
              mock.patch.object(colab_cli, 'headless_setup', return_value='print(1)\n'), \
+             mock.patch.object(colab_cli, 'preflight'), \
              mock.patch.object(colab_cli, 'usage', return_value={'balance': 100.0, 'rate': 0.0, 'active': 0}), \
-             mock.patch.object(colab_cli, 'sessions', return_value=['qwen38-huihui-v2']), \
+             mock.patch.object(colab_cli, 'sessions', return_value=[]), \
+             mock.patch.object(colab_cli, 'colab', return_value='created'), \
+             mock.patch.object(colab_cli, '_keepalive_running', return_value=False), \
              mock.patch.object(colab_cli, 'start_keepalive', side_effect=SystemExit('daemon failed')), \
-             mock.patch.object(colab_cli, 'cmd_stop', side_effect=lambda names: stopped.append(names)):
+             mock.patch.object(colab_cli, 'cmd_stop', side_effect=lambda names: stopped.append(names)), \
+             contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit):
                 colab_cli.cmd_start('qwen38-huihui-v2', 'G4', 45, False, False)
-        self.assertEqual(stopped, [['qwen38-huihui-v2']])
+        self.assertEqual(stopped, [['qwen38-huihui-v2']])  # the runtime this start created is released
+
+    def test_cmd_start_leaves_a_reused_session_running_when_keepalive_fails(self):
+        stopped = []
+        with mock.patch.object(colab_cli, '_config', return_value={'tailnet_fqdn': 'qwen.ts.net', 'api_key': 'k'}), \
+             mock.patch.object(colab_cli, 'headless_setup', return_value='print(1)\n'), \
+             mock.patch.object(colab_cli, 'preflight'), \
+             mock.patch.object(colab_cli, 'usage', return_value={'balance': 100.0, 'rate': 0.0, 'active': 1}), \
+             mock.patch.object(colab_cli, 'sessions', return_value=['qwen38-huihui-v2']), \
+             mock.patch.object(colab_cli, '_keepalive_running', return_value=True), \
+             mock.patch.object(colab_cli, 'start_keepalive', side_effect=SystemExit('daemon failed')), \
+             mock.patch.object(colab_cli, 'stop_keepalive', side_effect=AssertionError('daemon was not started here')), \
+             mock.patch.object(colab_cli, 'cmd_stop', side_effect=lambda names: stopped.append(names)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                colab_cli.cmd_start('qwen38-huihui-v2', 'G4', 45, False, False)
+        self.assertEqual(stopped, [])
 
     def test_reuse_active_easycolab_session_as_slug(self):
         import json, tempfile

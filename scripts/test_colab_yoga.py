@@ -49,7 +49,7 @@ class CliYogaTests(unittest.TestCase):
             exe.write_text('')
             with mock.patch.object(colab_cli, 'YOGA_EXE', exe), \
                     mock.patch.object(colab_cli, 'YOGA_PY', Path(td) / 'python.exe'), \
-                    mock.patch.object(colab_cli.subprocess, 'run', return_value=mock.Mock(returncode=0)), \
+                    mock.patch.object(colab_cli, 'run_streamed', return_value=(0, 'boot\nWAKE_URL: http://x\n')), \
                     mock.patch.object(colab_cli, 'sessions', return_value=['other', 'easycolab']), \
                     mock.patch.object(colab_cli, 'start_keepalive') as ka:
                 self.assertEqual(colab_cli.cmd_yoga(['wake', '--gpu', 'G4', '--idle-min', '30']), 0)

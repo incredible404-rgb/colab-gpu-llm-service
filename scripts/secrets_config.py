@@ -2,7 +2,8 @@
 
 Resolution order for every field: ``.secrets.json`` (repo root) -> environment variable -> placeholder.
 ``--sanitized`` skips the first two sources entirely, so a generated notebook can never carry a real
-credential, tailnet name or Drive file id. ``--output-dir <dir>`` redirects the generated .ipynb files.
+credential, tailnet name or Drive file id. ``--output-dir <dir>`` redirects the generated .ipynb files;
+without it a sanitized build goes to notebooks/ and a private one to the git-ignored notebooks/private/.
 """
 import json
 import os
@@ -12,6 +13,11 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SECRETS_FILE = ROOT_DIR / '.secrets.json'
+# Sanitized builds are committed in notebooks/. A private build carries real keys, so by default it goes to the
+# git-ignored notebooks/private/ instead of overwriting the tracked file of the same name (which would block
+# `git pull` in a skill directory that is itself a clone).
+NOTEBOOKS_DIR = ROOT_DIR / 'notebooks'
+PRIVATE_NOTEBOOKS_DIR = NOTEBOOKS_DIR / 'private'
 
 # A value copied verbatim from .secrets.example.json ("<YOUR_...>", "qwen.<YOUR_TAILNET>.ts.net") is not a
 # value: it must count as missing everywhere, or `start` would allocate a paid GPU with a dummy key.
@@ -47,6 +53,9 @@ FIELDS = {
     'rvn27b_drive_id': ('RVN27B_DRIVE_ID', '<YOUR_RVN27B_NOTEBOOK_DRIVE_ID>'),
     'glm53_drive_id': ('GLM53_DRIVE_ID', '<YOUR_GLM53_NOTEBOOK_DRIVE_ID>'),
     # Optional settings, empty by default so a fresh clone carries nobody's habits.
+    # Name of the Tailscale Service the runtime publishes (svc:<name>); empty = qwen. It must also be the
+    # first label of tailnet_fqdn.
+    'service_name': ('TS_SERVICE_NAME', ''),
     # System prompt the generated WebUI config starts with; empty = no system prompt.
     'webui_system_prompt': ('WEBUI_SYSTEM_PROMPT', ''),
     # Local "Colab Notebooks" folder generated notebooks are mirrored to; empty = never mirror.
@@ -64,17 +73,21 @@ def _arg_value(argv, flag):
 
 
 def _read_secrets(path):
-    """Parse .secrets.json: the top level must be an object and every field a non-empty string."""
+    """Parse .secrets.json: the top level must be an object and every field a string.
+
+    An empty string means "not configured", the same as leaving the key out: an optional field written as ""
+    is dropped here, and a required one then resolves to a placeholder and is reported as missing.
+    """
     try:
         data = json.loads(path.read_text(encoding='utf-8'))
     except ValueError as e:
         raise SystemExit('%s is not valid JSON: %s' % (path.name, e))
     if not isinstance(data, dict):
         raise SystemExit('%s must be a JSON object at the top level, got %s' % (path.name, type(data).__name__))
-    bad = [k for k, v in data.items() if not isinstance(v, str) or not v.strip()]
+    bad = [k for k, v in data.items() if not isinstance(v, str)]
     if bad:
-        raise SystemExit('%s: fields must be non-empty strings: %s' % (path.name, ', '.join(sorted(bad))))
-    return data
+        raise SystemExit('%s: fields must be strings: %s' % (path.name, ', '.join(sorted(bad))))
+    return {k: v for k, v in data.items() if v.strip()}
 
 
 def load_config(argv=None):
@@ -82,8 +95,11 @@ def load_config(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     sanitized = '--sanitized' in argv
     out_arg = _arg_value(argv, '--output-dir')
-    output_dir = Path(out_arg).expanduser().resolve() if out_arg else ROOT_DIR / 'notebooks'
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Whoever writes into the directory creates it: this loader is also called only to read settings.
+    if out_arg:
+        output_dir = Path(out_arg).expanduser().resolve()
+    else:
+        output_dir = NOTEBOOKS_DIR if sanitized else PRIVATE_NOTEBOOKS_DIR
 
     stored = {}
     if not sanitized and SECRETS_FILE.exists():

@@ -2,3 +2,4 @@
 .colab-meter-state.json
 __pycache__/
 *.pyc
+notebooks/private/

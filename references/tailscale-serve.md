@@ -4,6 +4,8 @@
 地址固定为 `qwen.<tailnet>.ts.net`（`svc:qwen` 这个 Service 的域名），只有登录同一 tailnet 的设备能连，
 不用买域名、不用 Cloudflare。域名指向 Service 的虚拟地址，和每次新建运行时拿到的节点名彻底解耦。
 
+Service 名默认是 `qwen`。想用别的名字，在 `.secrets.json` 里设 `service_name`（环境变量 `TS_SERVICE_NAME`），并让 Tailscale 里建的 Service、ACL 里的 `svc:...` 和 `tailnet_fqdn` 第一段同名；下文的 `qwen` / `svc:qwen` 都按这个名字替换。
+
 本文的“运行时里的流程”就是 `scripts/colab_kernel.py` 里 `prepare_tailscale()` 实际执行的步骤，
 2026-10 在 Colab 运行时上实测通过（Tailscale 1.104.1）。旧的“主机名方案”已废弃，留在文末附录供排查参考。
 
@@ -105,7 +107,7 @@ Invoke-RestMethod -Uri 'http://qwen.<tailnet>.ts.net:443/v1/models' -Headers @{A
 ```
 
 模型起来后同一地址就是 OpenAI 兼容接口：`http://qwen.<tailnet>.ts.net:443/v1`。
-各模型笔记本不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
+各模型笔记本不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。也就是说 `.secrets.json` 的 `api_key` 在服务端不校验：tailnet 内任何设备都能免密调用 `/v1`，配了文件桥时还能经 `--ui-mcp-proxy` 的 MCP 代理读写本机 `novel_root`。把 tailnet 共享给别人之前先收紧 ACL（只放行自己的设备）或加回 `--api-key-file`。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
 
 实测（2026-10-20）：新节点自带标签、服务主机自动 Online，
 Web 200、`/v1/models` 1.3 s、chat 1.66 s。

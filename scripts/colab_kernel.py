@@ -11,7 +11,7 @@ are frozen in archive/multi-model-kernel/; their last generated notebooks stay i
   once llama-server is spawned and that same daemon thread waits for /health before warmup),
   per-model-card sampling, post-load release of GPU-only tmpfs copies into a larger prompt cache,
   in-runtime hot switch between the registered quants, 7-cell layout, and 45-min idle guard.
-- Auto-distribution: generates notebooks/<name>.ipynb, auto-resolves new Google Drive cloud_id from DriveFS SQLite DB
+- Auto-distribution: generates notebooks/private/<name>.ipynb (git-ignored; --sanitized writes the committed notebooks/<name>.ipynb), auto-resolves new Google Drive cloud_id from DriveFS SQLite DB
   into .secrets.json, AST-validates all code cells, and syncs to Colab Web (--sync-colab) and Magpie (--sync-magpie,
   additive). A private build carries real keys, so it is mirrored to a Drive folder only on request:
   `notebooks_dir` in .secrets.json, COLAB_NOTEBOOKS_DIR, or --mirror-drive (probe for a local My Drive).
@@ -29,6 +29,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -40,7 +41,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from archived_models import ARCHIVED_MODELS
 from colab_sync import sync_requested
-from secrets_config import FIELDS, SECRETS_FILE, guard_sync, is_placeholder, load_config, report
+from secrets_config import (FIELDS, REQUIRED, SECRETS_FILE, guard_sync, is_placeholder, load_config,
+                            missing_required, report)
 from stdio_utf8 import force_utf8
 from webui_console import console_code
 
@@ -321,6 +323,22 @@ ALL_MODELS: dict[str, dict] = {**ARCHIVED_MODELS, **MODELS}
 # 只在生成端用、不写进首格 SPEC 的登记项。
 _GEN_ONLY_KEYS = ('notebook', 'drive_key', 'env_key', 'placeholder', 'title', 'banner')
 
+def service_name(config: dict) -> str:
+    """Tailscale Service name (the part after svc:), default 'qwen'.
+
+    It has to be the first label of tailnet_fqdn, which Tailscale derives from the Service name; a mismatch
+    would only show up at the end of cell 1 as "Service not active", after the weights were downloaded.
+    """
+    name = (config.get('service_name') or '').strip() or 'qwen'
+    if not re.fullmatch(r'[a-z0-9]([a-z0-9-]*[a-z0-9])?', name):
+        raise SystemExit('service_name %r is not a valid Tailscale Service name (lowercase letters, digits, hyphens)' % name)
+    fqdn = config.get('tailnet_fqdn') or ''
+    if not is_placeholder(fqdn) and fqdn.split('.', 1)[0].lower() != name:
+        raise SystemExit('tailnet_fqdn %s must start with the Service name "%s." (service_name in .secrets.json, '
+                         'default qwen)' % (fqdn, name))
+    return name
+
+
 def bridge_ip(config: dict) -> str:
     """Tailscale IP of the machine running local_novel_mcp.py, or '' when no file bridge is configured.
 
@@ -488,6 +506,7 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     ts_id = config['ts_client_id']
     ts_secret = config['ts_client_secret']
     mcp_ip = bridge_ip(config)
+    svc_name = service_name(config)
     system_prompt = (config.get('webui_system_prompt') or '').strip()
     alias = spec['alias']
     slug = spec['slug']
@@ -504,7 +523,7 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
 - **热切换**：“热切换模型”格不释放 G4 就换跑另一个已登记模型，省掉重新分配运行时和装 llama.cpp / Tailscale 的时间。
 - **采样参数**：`--temp {spec['temp']} --top-p {spec['top_p']} --top-k {spec['top_k']} --min-p {spec['min_p']}`（按模型卡官方默认值）
 - **WebUI 持久化{files_note}**：服务端内置 `--ui-config-file` 与 `--ui-mcp-proxy`，{prompt_note}关闭后台 LLM 标题生成防缓存冲刷{bridge_note}。
-- **固定入口（所有笔记本分时复用 `svc:qwen`）**：
+- **固定入口（所有笔记本分时复用 `svc:{svc_name}`）**：
   - 网页：`http://{fqdn}:443/`（首格就绪自动弹出，点首格停机按钮自动关闭）
   - 接口：`http://{fqdn}:443/v1`
   - 运行时目录：`{root_dir}`
@@ -665,7 +684,7 @@ def _mem_available():
             return int(l.split()[1]) * 1024
     return 0
 
-SERVICE = 'svc:qwen'
+SERVICE = {('svc:' + svc_name)!r}
 SERVICE_FQDN = {json.dumps(fqdn)}
 SERVICE_TAG = 'tag:colab'
 TS_HOSTNAME = SPEC['ts_hostname']
@@ -1811,12 +1830,14 @@ def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
     _selftest_boot_fp(setup_src)
     print('Prod-path HTTP (no /props):', prod_urls)
     nb_json = json.dumps(nb, ensure_ascii=False, indent=1) + '\n'
+    output_dir.mkdir(parents=True, exist_ok=True)
     nb_path = output_dir / spec['notebook']
     nb_path.write_text(nb_json, encoding='utf-8', newline='')
     print('Generated:', nb_path)
 
     mirror_dir = None if sanitized else drive_mirror_dir(config, argv)
-    if mirror_dir and '--sync-colab' not in argv and output_dir == ROOT_DIR / 'notebooks' and mirror_dir.exists():
+    default_outputs = (ROOT_DIR / 'notebooks' / 'private', ROOT_DIR / 'notebooks')
+    if mirror_dir and '--sync-colab' not in argv and output_dir in default_outputs and mirror_dir.exists():
         drive_nb = mirror_dir / spec['notebook']
         drive_nb.write_text(nb_json, encoding='utf-8', newline='')
         assert drive_nb.read_bytes() == nb_path.read_bytes()
@@ -1923,11 +1944,14 @@ def yoga_runners_path() -> Path:
     return local / 'Programs' / 'Colab-yoga' / 'colab_kernel_runners.json'
 
 
-def export_yoga_runners(config: dict, out_path: Path | None = None) -> None:
+def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
     """Export headless cell-1 runner scripts for all active MODELS to Colab-yoga's install directory.
 
     Skipped with a hint when Colab-yoga is not installed (its directory does not exist); the file is only
-    useful to that app, so nothing is created on its behalf.
+    useful to that app, so nothing is created on its behalf. Refused, naming the fields, when one of the
+    four required values is empty or still a <YOUR_...> placeholder: Colab-yoga would otherwise start a paid
+    GPU with a dummy key and tailnet name, and "Exported ..." is what callers take as success.
+    Returns True only when the file was written.
     """
     dst = out_path or yoga_runners_path()
     if not dst.parent.exists():
@@ -1935,8 +1959,14 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> None:
               'Install it to %LOCALAPPDATA%\\Programs\\Colab-yoga, or unzip it anywhere and set COLAB_YOGA_DIR to that '
               'folder, then re-run `python -X utf8 scripts/colab_kernel.py --all`. '
               'Optional app: https://github.com/incredible404-rgb/Colab-yoga')
-        return
-    marker = '就绪横幅 + WebUI 标签页 + 停机按钮'
+        return False
+    missing = [f for f in REQUIRED if is_placeholder(config.get(f))]
+    if missing:
+        print(f'Refused to export Colab-yoga runners: missing {", ".join(missing)} (empty or still a <YOUR_...> '
+              'placeholder in .secrets.json / environment). Fill them in, then re-run '
+              '`python -X utf8 scripts/colab_kernel.py --all`.', file=sys.stderr)
+        return False
+    marker ='就绪横幅 + WebUI 标签页 + 停机按钮'
     runners = {}
     for slug, spec in MODELS.items():
         nb = build_notebook_dict(spec, config, with_switch=False)
@@ -1964,6 +1994,7 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> None:
         }
     dst.write_text(json.dumps(runners, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='')
     print('Exported Colab-yoga runners to:', dst)
+    return True
 
 
 def run_single(slug: str):
@@ -2002,12 +2033,16 @@ def main():
         if slug not in ALL_MODELS:
             raise SystemExit(f'Unknown model slug: {slug}. Active: {", ".join(MODELS)} | Archived: {", ".join(ARCHIVED_MODELS)}')
         generate_one(slug, args)
+    refused = False
     if '--sanitized' not in args:
-        cfg, _, _, _ = load_config([])
+        cfg, _, _, sources = load_config([])
+        # A missing Colab-yoga install is a normal skip; only a refusal over unset required values is a failure.
+        refused = bool(missing_required(sources)) and yoga_runners_path().parent.exists()
         export_yoga_runners(cfg)
     if '--sync-magpie' in args:
         sync_magpie_models()
+    return 1 if refused else 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)
