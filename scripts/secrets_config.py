@@ -20,8 +20,10 @@ FIELDS = {
     'tailnet_fqdn': ('TAILNET_FQDN', 'qwen.<YOUR_TAILNET>.ts.net'),
     # Tailscale IP of the Windows machine running local_novel_mcp.py (the WebUI file bridge dials it).
     'local_tailscale_ip': ('LOCAL_TAILSCALE_IP', '<YOUR_LOCAL_TAILSCALE_IP>'),
-    'g4_drive_id': ('G4_DRIVE_ID', '<YOUR_G4_NOTEBOOK_DRIVE_ID>'),
-    'g4nl_drive_id': ('G4NL_DRIVE_ID', '<YOUR_G4NL_NOTEBOOK_DRIVE_ID>'),
+    'g4huihui_drive_id': ('G4HUIHUI_DRIVE_ID', '<YOUR_G4HUIHUI_NOTEBOOK_DRIVE_ID>'),
+    'gemma31b_drive_id': ('GEMMA31B_DRIVE_ID', '<YOUR_GEMMA31B_NOTEBOOK_DRIVE_ID>'),
+    'rvn27b_drive_id': ('RVN27B_DRIVE_ID', '<YOUR_RVN27B_NOTEBOOK_DRIVE_ID>'),
+    'glm53_drive_id': ('GLM53_DRIVE_ID', '<YOUR_GLM53_NOTEBOOK_DRIVE_ID>'),
 }
 
 

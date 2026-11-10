@@ -1,8 +1,8 @@
-"""Colab G4 kernel & notebook generator for Qwen3.8-Flash-Next (Swift-1.5 Heretic V2).
+"""Colab G4 kernel & notebook generator for Qwen3.8-Flash-Next (Huihui v2), Gemma-4-31B ARA Heretic, Qwen3.8-27B RVN BF16 & GLM-5.3-Flash GSQ-RCO-Q4.
 
-Single source of truth for the 3.8fn notebooks (IQ4_XS-plus `qwen38-fn`, IQ4_NL `qwen38-fn-nl`).
-Other models were moved out on 2026-11-06; the multi-model kernel is frozen in
-archive/multi-model-kernel/ and their last generated notebooks stay in notebooks/.
+Single source of truth for the active llama.cpp G4 notebooks (`qwen38-huihui-v2`, `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`).
+Earlier Heretic V2 models were moved to archive/heretic-v2/ on 2026-11-09, and 122B/Nemotron/Ortenzya
+are frozen in archive/multi-model-kernel/; their last generated notebooks stay in notebooks/.
 - Runtime kernel: llama.cpp b12032, Tailscale svc:qwen + SOCKS5 bridge to local Windows
   novel MCP (local_tailscale_ip:3426), persistent --ui-config-file + --ui-mcp-proxy, /dev/shm tmpfs
   allocator, 32-stream zero-GIL downloader, millisecond size check (no startup SHA-256),
@@ -11,7 +11,7 @@ archive/multi-model-kernel/ and their last generated notebooks stay in notebooks
   once llama-server is spawned and that same daemon thread waits for /health before warmup),
   per-model-card sampling, post-load release of GPU-only tmpfs copies into a larger prompt cache,
   in-runtime hot switch between the registered quants, 7-cell layout, and 45-min idle guard.
-- Auto-distribution: generates notebooks/<name>.ipynb, mirrors to G:/My Drive/Colab Notebooks/,
+- Auto-distribution: generates notebooks/<name>.ipynb, mirrors to the local Google Drive 'Colab Notebooks' folder (COLAB_NOTEBOOKS_DIR),
   auto-resolves new Google Drive cloud_id from DriveFS SQLite DB into .secrets.json, AST-validates
   all code cells, and syncs to Colab Web (--sync-colab) and Magpie (--sync-magpie, additive).
 
@@ -32,12 +32,33 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from archived_models import ARCHIVED_MODELS
 from colab_sync import sync_requested
 from secrets_config import FIELDS, SECRETS_FILE, guard_sync, load_config, report
 from webui_console import console_code
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DRIVE_NB_DIR = Path('G:/My Drive/Colab Notebooks')
+
+
+def _drive_notebooks_dir() -> Path | None:
+    """Local 'Colab Notebooks' folder of Google Drive for desktop; generated notebooks are mirrored there.
+
+    COLAB_NOTEBOOKS_DIR overrides. Otherwise every drive letter D..Z is probed for a My Drive root (English
+    name or its zh-CN localization). None when Drive for desktop is not mounted: the mirror is optional.
+    """
+    env = os.environ.get('COLAB_NOTEBOOKS_DIR')
+    if env:
+        return Path(env)
+    roots = ('My Drive', '\u6211\u7684\u4e91\u7aef\u786c\u76d8')  # zh-CN Drive localizes "My Drive"
+    for letter in 'DEFGHIJKLMNOPQRSTUVWXYZ':
+        for root in roots:
+            cand = Path(f'{letter}:/{root}/Colab Notebooks')
+            if cand.exists():
+                return cand
+    return None
+
+
+DRIVE_NB_DIR = _drive_notebooks_dir()
 LOCAL_MCP_PORT = 3426
 
 
@@ -49,23 +70,35 @@ def _drivefs_db() -> Path | None:
     dbs = sorted(base.glob('*/metadata_sqlite_db'), key=lambda p: p.stat().st_mtime, reverse=True)
     return dbs[0] if dbs else None
 
-# 3.8fn 注册表：同一份权重的不同量化，采样/模板/MTP 共用。
+# 3.8fn 默认主力注册表：huihui-ai v2 方向消融（不动专家层，作者最新 calibration3 / imatrix_micro3 重校的 unsloth-UD-Q4_K_XL-V2）。
+# 4 片共 111.33 GB（103.69 GiB），第 2 片含 30.53 GiB IQ4_NL PLE 表 + 前 11 层，纯 GPU 主干 73.16 GiB（78.55 GB），
+# 在单张 G4 96GB 上实测显存占用 92,337 / 97,887 MiB，小说解码 104.4 tok/s（MTP 接受率 56.2%）。
+_HUIHUI_REPO = 'huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF'
+_HUIHUI_REV = 'cbc7fba13f1939ac3fa42b18d77ccf43847d74ef'
+_HUIHUI_SUBDIR = 'unsloth-UD-Q4_K_XL-V2'
+_HUIHUI_NAME = 'Qwen3.8-Flash-Next-UD-Q4_K_XL-{:05d}-of-00004.gguf'
+_HUIHUI_SHARDS = [
+    (10_946_624, '4448186216b3af4cc558bbce2c3213f01608f8f8b2e5267a9767971dd3ec8082'),
+    (49_859_583_136, 'ab283aba22daee321944dad65b09180810140fc75502c0791200cf01b85f9c75'),
+    (49_376_141_504, '2a8d2e69ba47fef6b42c953c07a24b5d4c59c1c2cdc89b2bc17e13e000a62fa0'),
+    (12_087_983_520, '0d626450754c554235f93653b8f7c874c7c2d35380b9efab5b0852d616b84702'),
+]
 MODELS: dict[str, dict] = {
-    'qwen38-fn': {
-        'slug': 'qwen38-fn',
-        'notebook': 'qwen3.8-flash-next-g4-colab.ipynb',
-        'drive_key': 'g4_drive_id',
-        'env_key': 'G4_DRIVE_ID',
-        'placeholder': '<YOUR_G4_NOTEBOOK_DRIVE_ID>',
-        'alias': 'Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS',
-        'title': 'Swift-1.5-Qwen3.8-Flash-Next · Colab G4 中文长篇小说共创与全能主力服务（Heretic V2 原生破限 IQ4_XS-plus）',
-        'banner': '🔓 Heretic V2 原生破限 125B，满速运行',
-        'root_dir': '/content/qwen38-fn',
-        'ts_hostname': 'qwen-g4-colab',
+    'qwen38-huihui-v2': {
+        'slug': 'qwen38-huihui-v2',
+        'notebook': 'qwen3.8-flash-next-huihui-v2-g4-colab.ipynb',
+        'drive_key': 'g4huihui_drive_id',
+        'env_key': 'G4HUIHUI_DRIVE_ID',
+        'placeholder': '<YOUR_G4HUIHUI_NOTEBOOK_DRIVE_ID>',
+        'alias': 'Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL',
+        'title': 'Huihui-Qwen3.8-Flash-Next-abliterated-v2 · Colab G4 中文长篇小说共创与全能主力服务（UD-Q4_K_XL-V2 原生消融破限）',
+        'banner': '🔓 Huihui v2 原生消融 125B · UD-Q4_K_XL-V2，满速运行',
+        'root_dir': '/content/qwen38-huihui-v2',
+        'ts_hostname': 'qwen-g4huihui-colab',
         'min_vram_mib': 85000,
-        'ram_reserve_gib': 95,  # Reserve 95 GiB for 26.82 GiB PLE MAP_POPULATE + CUDA pinned buffers
-        'ple_shard_name': 'Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00002-of-00006.gguf',
-        # 采样按 Qwen3.8-Flash-Next 模型卡「思考模式」默认值（Swift-1.5 仓库没另给）。
+        'ram_reserve_gib': 95,
+        'ple_shard_name': _HUIHUI_NAME.format(2),
+        # 采样按 Qwen3.8-Flash-Next 模型卡「思考模式」默认值。
         'temp': '1.0',
         'top_p': '0.95',
         'top_k': '20',
@@ -77,72 +110,24 @@ MODELS: dict[str, dict] = {
         'mtp_p_min': '0.48',
         'files': [
             {
-                'role': 'model',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00001-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 539_422_592,
-                'sha256': 'b963118b880fe3b7413e53b474c1d8d3faefc1ae0d2d6bae7a7c3e9f68217b46',
-                'priority': 2,
-            },
-            {
-                'role': 'shard',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00002-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 28_800_138_432,
-                'sha256': '0e9027aa7de4817c91b5954039b563484466392e29a6b051b096f9c47a71a1c6',
-                'priority': 1,  # PLE table shard -> top priority for /dev/shm tmpfs
-            },
-            {
-                'role': 'shard',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00003-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 16_681_220_224,
-                'sha256': '95c25e4ada4fa9ce4380683e55fb9f55aa8e411dcca13bec789f3cc106ffd403',
-                'priority': 3,
-            },
-            {
-                'role': 'shard',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00004-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 16_984_320_096,
-                'sha256': '5458253ef234558243c522c8d5289b923fe28601ec6aca26239de14f03ed1951',
-                'priority': 3,
-            },
-            {
-                'role': 'shard',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00005-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 16_662_985_152,
-                'sha256': 'ae9f3f684493f0107f0aa01dd603844266ee8b9a53bad53475761f2acc31202a',
-                'priority': 3,
-            },
-            {
-                'role': 'shard',
-                'repo': 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer',
-                'rev': '76208ff7308ccebd887eec5293d3cab305091514',
-                'path': 'IQ4_XS/Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_XS-plus-00006-of-00006.gguf',
-                'local_subdir': 'IQ4_XS',
-                'size': 15_036_859_296,
-                'sha256': 'bcebb4fecfaaf887c2a763c252ecca17749efe175e6c9c1c45d555c0e68906c0',
-                'priority': 3,
-            },
+                'role': 'model' if i == 1 else 'shard',
+                'repo': _HUIHUI_REPO,
+                'rev': _HUIHUI_REV,
+                'path': f'{_HUIHUI_SUBDIR}/{_HUIHUI_NAME.format(i)}',
+                'local_subdir': _HUIHUI_SUBDIR,
+                'size': size,
+                'sha256': sha,
+                'priority': 1 if i == 2 else (2 if i == 1 else 3),
+            }
+            for i, (size, sha) in enumerate(_HUIHUI_SHARDS, start=1)
+        ] + [
             {
                 'role': 'mmproj',
-                'repo': 'ukisai/Swift-1.5-Qwen3.8-Flash-Next-GGUF',
-                'rev': '0142554c963a8653912c0c8283f05f13f63653f3',
-                'path': 'mmproj-Swift-1.5-Qwen3.8-Flash-Next-BF16.gguf',
-                'size': 907_543_520,
-                'sha256': 'cd1140f4abba943ce8d9fa92fed8407e389954d26907efde7b72153c75bd8a60',
+                'repo': _HUIHUI_REPO,
+                'rev': _HUIHUI_REV,
+                'path': 'mmproj-Qwen3.8-Flash-Next-BF16.gguf',
+                'size': 907_543_008,
+                'sha256': 'b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0',
                 'priority': 2,
             },
             {
@@ -156,51 +141,166 @@ MODELS: dict[str, dict] = {
             },
         ],
     },
+    'gemma4-31b': {
+        'slug': 'gemma4-31b',
+        'notebook': 'gemma4-31b-g4-colab.ipynb',
+        'drive_key': 'gemma31b_drive_id',
+        'env_key': 'GEMMA31B_DRIVE_ID',
+        'placeholder': '<YOUR_GEMMA31B_NOTEBOOK_DRIVE_ID>',
+        'alias': 'Gemma-4-31B-it-ARA-Heretic-Q8_0',
+        'title': 'Gemma-4-31B-it-ARA-Heretic-Q8_0 · Colab G4 高人感创意写作与角色共创服务（Q8_0 满血版）',
+        'banner': '🔓 Gemma 4 31B ARA Heretic Q8_0，满速运行',
+        'root_dir': '/content/gemma4-31b',
+        'ts_hostname': 'gemma4-31b-colab',
+        'min_vram_mib': 35000,
+        'ram_reserve_gib': 30,
+        'ple_shard_name': None,
+        'template_family': 'gemma4',
+        # 采样按 Gemma 4 模型卡：temperature=1.0, top_p=0.95, top_k=64，min_p 显式设 0。
+        'temp': '1.0',
+        'top_p': '0.95',
+        'top_k': '64',
+        'min_p': '0.0',
+        'reasoning_effort_default': 'high',
+        'effort_prompts': {'xhigh': '用中文思考，尽量深入。', 'high': '用中文思考。', 'medium': '用中文思考，简短些。', 'low': '用中文思考，越短越好。'},
+        'mtp_n_max': 3,
+        'mtp_p_min': '0.50',
+        'files': [
+            {
+                'role': 'model',
+                'repo': 'mradermacher/gemma-4-31B-it-ARA-heretic-GGUF',
+                'rev': '1b49bbdcb3dfaa67cc4daced7da7d16552959f97',
+                'path': 'gemma-4-31B-it-ARA-heretic.Q8_0.gguf',
+                'size': 32_635_677_600,
+                'sha256': '0312793c4b98e8ef6dd0d8ae46eade91db6c8c29723b2c58741ef30ef9e849a8',
+                'priority': 1,
+            },
+            {
+                'role': 'mmproj',
+                'repo': 'mradermacher/gemma-4-31B-it-ARA-heretic-GGUF',
+                'rev': '1b49bbdcb3dfaa67cc4daced7da7d16552959f97',
+                'path': 'gemma-4-31B-it-ARA-heretic.mmproj-f16.gguf',
+                'size': 1_198_957_152,
+                'sha256': 'fff3ae7b364154cb835241ee5a436941bee24e982fe270fe9084c0eba7206310',
+                'priority': 1,
+            },
+            {
+                'role': 'draft',
+                'repo': 'unsloth/gemma-4-31B-it-GGUF',
+                'rev': 'c1ac76e99d5513b141e8adde7288b85c3f9c32ec',
+                'path': 'MTP/mtp-gemma-4-31B-it-BF16.gguf',
+                'size': 954_843_264,
+                'sha256': '8e6211a54648eca5af909bddf9331b447203b1a7febae6831491367afb61da7f',
+                'priority': 1,
+            },
+        ],
+    },
+    'qwen38-27b-rvn': {
+        'slug': 'qwen38-27b-rvn',
+        'notebook': 'qwen3.8-27b-rvn-g4-colab.ipynb',
+        'drive_key': 'rvn27b_drive_id',
+        'env_key': 'RVN27B_DRIVE_ID',
+        'placeholder': '<YOUR_RVN27B_NOTEBOOK_DRIVE_ID>',
+        'alias': 'Qwen3.8-27B-RVN-Heretic-BF16',
+        'title': 'Qwen3.8-27B-RVN-Heretic-BF16 · Colab G4 原精度 BF16 双重 ARA 破限服务（53.8GB 满血版）',
+        'banner': '🔓 Qwen3.8 27B RVN Heretic BF16 原精度满血，满速运行',
+        'root_dir': '/content/qwen38-27b-rvn',
+        'ts_hostname': 'qwen-rvn27b-colab',
+        'min_vram_mib': 60000,
+        'ram_reserve_gib': 45,
+        'ple_shard_name': None,
+        'template_family': 'qwen38_fn',
+        # 采样按 Qwen3.8-27B 模型卡思考模式默认值：temperature=1.0, top_p=0.95, top_k=20, min_p=0.0。
+        'temp': '1.0',
+        'top_p': '0.95',
+        'top_k': '20',
+        'min_p': '0.0',
+        'reasoning_effort_default': 'high',
+        'effort_prompts': {'xhigh': '用中文思考，尽量深入。', 'high': '用中文思考。', 'medium': '用中文思考，简短些。', 'low': '用中文思考，越短越好。'},
+        'mtp_n_max': 3,
+        'mtp_p_min': '0.45',
+        'files': [
+            {
+                'role': 'model',
+                'repo': '0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF',
+                'rev': 'ab8d7bd81d03117501e4da60cccdff4c80f0eea0',
+                'path': 'RVN-BF16.gguf',
+                'size': 53_808_281_888,
+                'sha256': '461fa227cb3d0bb49a3e8e45ec2b650f9a2e593c51a92144d5ac819f0ee8f37d',
+                'priority': 1,
+            },
+            {
+                'role': 'mmproj',
+                'repo': 'unsloth/Qwen3.8-27B-GGUF',
+                'rev': '4ca720788d1e01f1bff70c033e0d0028fd02e502',
+                'path': 'mmproj-BF16.gguf',
+                'size': 931_146_432,
+                'sha256': '83ee4f4f205fa514161778c41df1ea14144faa0f713510893b63c2395f5c2d53',
+                'priority': 1,
+            },
+            {
+                'role': 'draft',
+                'repo': 'unsloth/Qwen3.8-27B-GGUF',
+                'rev': '4ca720788d1e01f1bff70c033e0d0028fd02e502',
+                'path': 'MTP/mtp-Qwen3.8-27B-Q4_0.gguf',
+                'size': 1_369_590_656,
+                'sha256': '50d9ce5a6da381bbcfb31061cf73df94a90e6faf8efeddee379a9cb8f1501c6e',
+                'priority': 1,
+            },
+        ],
+    },
+    'glm53-flash': {
+        'slug': 'glm53-flash',
+        'notebook': 'glm5.3-flash-abliterated-g4-colab.ipynb',
+        'drive_key': 'glm53_drive_id',
+        'env_key': 'GLM53_DRIVE_ID',
+        'placeholder': '<YOUR_GLM53_NOTEBOOK_DRIVE_ID>',
+        'alias': 'GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4',
+        'title': 'GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4 · Colab G4 320B-A18B 混合注意力与消融破限主力服务（已合入 GCSA-AiLab LoRA-v2）',
+        'banner': '🔓 GLM-5.3-Flash 320B-A18B GSQ-RCO-Q4（合入 LoRA-v2），满速运行',
+        'root_dir': '/content/glm53-flash',
+        'ts_hostname': 'glm53-flash-colab',
+        'min_vram_mib': 85000,
+        # 预留 65 GiB 给前 19 层（含 16 个 MoE 层共 47.00 GiB）CPU 专家锁页内存 + 16 GiB Prompt Cache；127.66 GiB 单文件直落 /content 本地盘。
+        'ram_reserve_gib': 65,
+        'ple_shard_name': None,
+        'template_family': 'glm5_next',
+        # 采样按 zai-org/GLM-5.3-Flash 模型卡 generation_config.json 默认值：temperature=1.0, top_p=0.95；top_k 与 min_p 显式设 0。
+        'temp': '1.0',
+        'top_p': '0.95',
+        'top_k': '0',
+        'min_p': '0.0',
+        'reasoning_effort_default': 'high',
+        'effort_prompts': {'xhigh': '用中文思考，尽量深入。', 'high': '用中文思考。', 'medium': '用中文思考，简短些。', 'low': '用中文思考，越短越好。'},
+        'mtp_n_max': None,
+        'mtp_p_min': None,
+        # 前 19 层（blk.3..18 共 16 个 MoE 层，47.00 GiB）路由专家驻留 176 GiB DDR5 内存；后 26 个 MoE 层（71.07 GiB）+ 非专家层（8.95 GiB）+ mmproj（1.08 GiB）= 81.10 GiB 常驻 G4 96GB 显存。
+        'extra_server_flags': ['--n-cpu-moe', '19'],
+        'files': [
+            {
+                'role': 'model',
+                'repo': 'GCSA-AiLab/GLM-5.3-Flash-Uncensored-RCO-GSQ-GGUF',
+                'rev': '1827843362350fbc87ee6b478d9dd09e33d9fb50',
+                'path': 'Q4/GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4.gguf',
+                'local_subdir': 'Q4',
+                'size': 137_073_273_280,
+                'sha256': '49f3ccd0f62b622ff6f66bfe12c79b71787a360c22449594ded0b75c0cf4f3b4',
+                'priority': 2,
+            },
+            {
+                'role': 'mmproj',
+                'repo': 'unsloth/GLM-5.3-Flash-GGUF',
+                'rev': 'a38483c8cd5df544f53d70fb281afe97369d5ab6',
+                'path': 'mmproj-BF16.gguf',
+                'size': 1_164_010_176,
+                'sha256': '82b7adb44411dbb298b1c689567804e5ed0790d80f308ed8b5b6b8ac0527d2ac',
+                'priority': 1,
+            },
+        ],
+    },
 }
 
-# 同一份 Swift-1.5 Heretic V2 权重的 IQ4_NL 量化：热尾层 down 近 8 bit、44–46 层 gate/up 5 bit，显存部分 80.1 GB
-# （IQ4_XS-plus 为 65.9 GB）。采样、模板、MTP 与现版完全一致，只换权重，方便和 qwen38-fn 做 A/B；
-# 第 2 片同样只装 per_layer_token_embd（N-gram 表），所以沿用常驻内存盘的处理。
-_NL_REPO = 'jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer'
-_NL_REV = 'bd3bca068a544d459cf42902bf21a0fac00ec853'
-_NL_NAME = 'Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_NL-{:05d}-of-00008.gguf'
-_NL_SHARDS = [
-    (3_208_309_664, '9344341eab2c2d9d59c8a4a9533c8cfc515547675d7a139d17957968a3019c5b'),
-    (28_800_138_432, '56a185873792b560485ee971ba5c4f9c5558def5e3e70dbf0f8925e9849eb513'),
-    (13_700_060_352, 'e6c22d9c0a22e39fb25decc81d8862667d8184907c623b182d9e2771ebfb9e03'),
-    (13_766_580_576, 'a8e29ba699751bf05250824b7075aee2383048b39290ab55fb50c677925a1a37'),
-    (13_643_236_928, 'afa6f9afdeccef869b8f9ed1b3800246a626a9ff4e34859926800ed17e0cbdec'),
-    (13_670_914_048, 'da51b3a9d3f485a54e69f16338f7f1dc21f0032b470116c75c508f1422446848'),
-    (13_751_645_536, 'a232c44cfc9fe5555ab5dde1c629120eada854f598a8c26247aac552b68697c2'),
-    (8_352_778_560, '2148d4cf9c7d03c953ec3c95fc28f23cbad13547be4ebfd4ecf4d590d1498cd3'),
-]
-MODELS['qwen38-fn-nl'] = {
-    **MODELS['qwen38-fn'],
-    'slug': 'qwen38-fn-nl',
-    'notebook': 'qwen3.8-flash-next-nl-g4-colab.ipynb',
-    'drive_key': 'g4nl_drive_id',
-    'env_key': 'G4NL_DRIVE_ID',
-    'placeholder': '<YOUR_G4NL_NOTEBOOK_DRIVE_ID>',
-    'alias': 'Swift-1.5-Qwen3.8-Flash-Next-IQ4_NL',
-    'title': 'Swift-1.5-Qwen3.8-Flash-Next · Colab G4 中文长篇小说共创与全能主力服务（Heretic V2 原生破限 IQ4_NL 高精度版）',
-    'banner': '🔓 Heretic V2 原生破限 125B · IQ4_NL 高精度版，满速运行',
-    'root_dir': '/content/qwen38-fn-nl',
-    'ts_hostname': 'qwen-g4nl-colab',
-    'ple_shard_name': _NL_NAME.format(2),
-    'files': [
-        {
-            'role': 'model' if i == 1 else 'shard',
-            'repo': _NL_REPO,
-            'rev': _NL_REV,
-            'path': _NL_NAME.format(i),
-            'local_subdir': 'IQ4_NL',
-            'size': size,
-            'sha256': sha,
-            'priority': 1 if i == 2 else (2 if i == 1 else 3),
-        }
-        for i, (size, sha) in enumerate(_NL_SHARDS, start=1)
-    ] + [f for f in MODELS['qwen38-fn']['files'] if f['role'] in ('mmproj', 'draft')],
-}
+ALL_MODELS: dict[str, dict] = {**ARCHIVED_MODELS, **MODELS}
 
 # effort_prompts 四档文本必须两两不同：llama.cpp 靠渲染差异探测 reasoning_effort_levels，/props 门禁要求报齐四档。
 # 只在生成端用、不写进首格 SPEC 的登记项。
@@ -452,6 +552,7 @@ def _local_path(f):
 MODEL = _local_path(FILES[0])
 MMPROJ = next((_local_path(f) for f in FILES if f['role'] == 'mmproj'), None)
 DRAFT = next((_local_path(f) for f in FILES if f['role'] == 'draft'), None)
+LORA = next((_local_path(f) for f in FILES if f['role'] == 'lora'), None)
 # PLE 表所在目录跟着各模型的 local_subdir 走（IQ4_XS / IQ4_NL …），不能写死。
 SHARD_DIR = next((_local_path(f).parent for f in FILES if Path(f['path']).name == SPEC.get('ple_shard_name')), ROOT)
 
@@ -993,7 +1094,9 @@ for _lvl, _txt in SPEC['effort_prompts'].items():
     universal_effort_block = universal_effort_block.replace('@%s@' % _lvl, _txt)
 universal_effort_block = universal_effort_block.replace('@default@', SPEC.get('reasoning_effort_default') or 'high')
 
-old_effort_block = '''{{%- if enable_thinking is undefined or enable_thinking is true %}}
+fam = SPEC.get('template_family', 'qwen38_fn')
+if fam == 'qwen38_fn':
+    old_effort_block = '''{{%- if enable_thinking is undefined or enable_thinking is true %}}
     {{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}}
     {{%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}}
         {{{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '. Supported types are xhigh (default), medium, and low.') }}}}
@@ -1004,18 +1107,167 @@ old_effort_block = '''{{%- if enable_thinking is undefined or enable_thinking is
         {{%- set reasoning_instructions = 'Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.' %}}
     {{%- endif %}}
 {{%- endif %}}'''
-assert old_effort_block in tmpl_str, '未找到预期的 reasoning_effort 模板块'
-tmpl_str = tmpl_str.replace(old_effort_block, universal_effort_block, 1)
-old_preserve_line = '{{%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}}'
-assert old_preserve_line in tmpl_str, '未找到预期的 preserve_thinking 模板行'
-# 官方默认 preserve_thinking 未定义即为真，历史轮次会被套上空 <think></think>。
-# 只保留当前工具链里 reasoning_content 非空的轮次，避免 few-shot 诱导模型秒关思考。
-# 生成起手块不改：官方只在 enable_thinking=false 时关思考，low 照常思考。
-tmpl_str = tmpl_str.replace(
-    old_preserve_line,
-    '{{%- if loop.index0 > ns.last_query_index and reasoning_content %}}',
-    1,
-)
+    # Unsloth 导出的原版 Qwen3.8 模板在 resolved_reasoning_effort 下多塞了 3 行 high->xhigh 折合；先剥掉再统一替换成四档中文引导。
+    unsloth_high_shim = '''    {{%- if resolved_reasoning_effort == 'high' %}}
+        {{%- set resolved_reasoning_effort = 'xhigh' %}}
+    {{%- endif %}}
+'''
+    tmpl_str = tmpl_str.replace(unsloth_high_shim, '', 1)
+    assert old_effort_block in tmpl_str, '未找到预期的 reasoning_effort 模板块'
+    tmpl_str = tmpl_str.replace(old_effort_block, universal_effort_block, 1)
+    old_preserve_line = '{{%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}}'
+    assert old_preserve_line in tmpl_str, '未找到预期的 preserve_thinking 模板行'
+    # 官方默认 preserve_thinking 未定义即为真，历史轮次会被套上空 <think></think>。
+    # 只保留当前工具链里 reasoning_content 非空的轮次，避免 few-shot 诱导模型秒关思考。
+    # 生成起手块不改：官方只在 enable_thinking=false 时关思考，low 照常思考。
+    tmpl_str = tmpl_str.replace(
+        old_preserve_line,
+        '{{%- if loop.index0 > ns.last_query_index and reasoning_content %}}',
+        1,
+    )
+elif fam == 'gemma4':
+    old_think_body = '''        {{{{- '<|think|>\\\\n' -}}}}
+        {{%- set ns.prev_message_type = 'think' -%}}'''
+    new_think_body = '''        {{{{- '<|think|>\\\\n' + (reasoning_instructions + '\\\\n' if reasoning_instructions else '') -}}}}
+        {{%- set ns.prev_message_type = 'think' -%}}'''
+    assert old_think_body in tmpl_str, '未找到预期的 gemma4 <|think|> 注入块'
+    tmpl_str = tmpl_str.replace(
+        '{{%- set enable_thinking = enable_thinking | default(false) -%}}',
+        '{{%- set enable_thinking = enable_thinking | default(true) -%}}',
+        1,
+    )
+    tmpl_str = (
+        "{{%- if enable_thinking is not defined %}}{{%- set enable_thinking = true %}}{{%- endif %}}\\n"
+        + universal_effort_block
+        + "\\n"
+        + tmpl_str.replace(old_think_body, new_think_body, 1)
+    )
+elif fam == 'glm5_next':
+    old_glm_head = '''{{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined and reasoning_effort in ['low', 'high'] else 'max' -%}}
+{{%- if effective_reasoning_effort is not none -%}}<|system|>Reasoning Effort: {{{{ effective_reasoning_effort | capitalize }}}}{{%- endif -%}}
+{{%- set clear_thinking = clear_thinking if clear_thinking is defined else false -%}}'''
+    new_glm_head = (
+        universal_effort_block
+        + "\\n{{%- set effective_reasoning_effort = 'max' if resolved_reasoning_effort == 'xhigh' else ('low' if resolved_reasoning_effort == 'low' else 'high') -%}}"
+        + "\\n{{%- if effective_reasoning_effort is not none -%}}<|system|>Reasoning Effort: {{{{ effective_reasoning_effort | capitalize }}}}{{{{ ('\\\\n' + reasoning_instructions) if reasoning_instructions else '' }}}}{{%- endif -%}}"
+        + "\\n{{%- set clear_thinking = clear_thinking if clear_thinking is defined else true -%}}"
+    )
+    assert old_glm_head in tmpl_str, '未找到预期的 glm5_next reasoning_effort 模板块'
+    tmpl_str = tmpl_str.replace(old_glm_head, new_glm_head, 1)
+elif fam == 'qwen35':
+    old_tools_head = "{{%- if tools and tools is iterable and tools is not mapping %}}\\n    {{{{- '<|im_start|>system\\\\n' }}}}"
+    new_tools_head = (
+        universal_effort_block
+        + "\\n{{%- if tools and tools is iterable and tools is not mapping %}}\\n"
+        + "    {{{{- '<|im_start|>system\\\\n' }}}}\\n"
+        + "    {{%- if reasoning_instructions %}}\\n"
+        + "        {{{{- reasoning_instructions + '\\\\n\\\\n' }}}}\\n"
+        + "    {{%- endif %}}"
+    )
+    assert old_tools_head in tmpl_str, '未找到预期的 qwen35 tools system 头部'
+    tmpl_str = tmpl_str.replace(old_tools_head, new_tools_head, 1)
+    old_tools_sys = '''    {{%- if messages[0].role == 'system' %}}
+        {{%- set content = render_content(messages[0].content, false, true)|trim %}}
+        {{%- if content %}}
+            {{{{- '\\\\n\\\\n' + content }}}}
+        {{%- endif %}}
+    {{%- endif %}}
+    {{{{- '<|im_end|>\\\\n' }}}}
+{{%- else %}}
+    {{%- if messages[0].role == 'system' %}}
+        {{%- set content = render_content(messages[0].content, false, true)|trim %}}
+        {{{{- '<|im_start|>system\\\\n' + content + '<|im_end|>\\\\n' }}}}
+    {{%- endif %}}
+{{%- endif %}}'''
+    new_tools_sys = '''    {{%- if messages[0].role == 'system' %}}
+        {{%- set content = render_content(messages[0].content, false, true)|trim %}}
+        {{%- if content %}}
+            {{{{- '\\\\n\\\\n' + content }}}}
+        {{%- endif %}}
+    {{%- endif %}}
+    {{{{- '<|im_end|>\\\\n' }}}}
+{{%- else %}}
+    {{%- if messages[0].role == 'system' %}}
+        {{%- set content = render_content(messages[0].content, false, true)|trim %}}
+        {{{{- '<|im_start|>system\\\\n' + (reasoning_instructions + '\\\\n\\\\n' if reasoning_instructions else '') + content + '<|im_end|>\\\\n' }}}}
+    {{%- elif reasoning_instructions %}}
+        {{{{- '<|im_start|>system\\\\n' + reasoning_instructions + '<|im_end|>\\\\n' }}}}
+    {{%- endif %}}
+{{%- endif %}}'''
+    assert old_tools_sys in tmpl_str, '未找到预期的 qwen35 system 分支块'
+    tmpl_str = tmpl_str.replace(old_tools_sys, new_tools_sys, 1)
+    old_hist_think = '{{%- if loop.index0 > ns.last_query_index %}}'
+    assert old_hist_think in tmpl_str, '未找到预期的历史思考保留条件'
+    tmpl_str = tmpl_str.replace(old_hist_think, '{{%- if loop.index0 > ns.last_query_index and reasoning_content %}}', 1)
+    qwen_gen_think_old = '''    {{%- if enable_thinking is defined and enable_thinking is false %}}
+        {{{{- '<think>\\\\n\\\\n</think>\\\\n\\\\n' }}}}
+    {{%- else %}}
+        {{{{- '<think>\\\\n' }}}}
+    {{%- endif %}}'''
+    qwen_gen_think_new = '''    {{%- if (enable_thinking is defined and enable_thinking is false) or (reasoning_effort is defined and reasoning_effort == 'low') %}}
+        {{{{- '<think>\\\\n\\\\n</think>\\\\n\\\\n' }}}}
+    {{%- else %}}
+        {{{{- '<think>\\\\n' }}}}
+    {{%- endif %}}'''
+    assert qwen_gen_think_old in tmpl_str, '未找到预期的 add_generation_prompt 思考起手块'
+    tmpl_str = tmpl_str.replace(qwen_gen_think_old, qwen_gen_think_new, 1)
+elif fam == 'nemotron':
+    old_trunc = '{{%- set truncate_history_thinking = truncate_history_thinking if truncate_history_thinking is defined else True %}}'
+    assert old_trunc in tmpl_str, '未找到预期的 truncate_history_thinking 行'
+    tmpl_str = tmpl_str.replace(old_trunc, '{{%- set truncate_history_thinking = false %}}', 1)
+    old_sys_block = '''{{%- if messages[0]["role"] == "system" %}}
+    {{%- set system_message = messages[0]["content"] %}}
+    {{%- set loop_messages = messages[1:] %}}
+{{%- else %}}
+    {{%- set system_message = "" %}}
+    {{%- set loop_messages = messages %}}
+{{%- endif %}}'''
+    new_sys_block = (
+        universal_effort_block
+        + '''
+{{%- if messages[0]["role"] == "system" %}}
+    {{%- set system_message = (reasoning_instructions ~ "\\\\n\\\\n" if reasoning_instructions else "") ~ render_content(messages[0]["content"]) %}}
+    {{%- set loop_messages = messages[1:] %}}
+{{%- else %}}
+    {{%- set system_message = reasoning_instructions %}}
+    {{%- set loop_messages = messages %}}
+{{%- endif %}}'''
+    )
+    assert old_sys_block in tmpl_str, '未找到预期的 nemotron system_message 块'
+    tmpl_str = tmpl_str.replace(old_sys_block, new_sys_block, 1)
+    nemo_gen_think_old = '''{{%- if add_generation_prompt %}}
+    {{%- if enable_thinking %}}
+        {{{{- '<|im_start|>assistant\\\\n<think>\\\\n' }}}}
+    {{%- else %}}
+        {{{{- '<|im_start|>assistant\\\\n<think></think>' }}}}
+    {{%- endif %}}
+{{%- endif %}}'''
+    nemo_gen_think_new = '''{{%- if add_generation_prompt %}}
+    {{{{- '<|im_start|>assistant\\\\n' }}}}
+    {{%- if (enable_thinking is defined and enable_thinking is false) or (reasoning_effort is defined and reasoning_effort == 'low') %}}
+        {{{{- '<think></think>' }}}}
+    {{%- else %}}
+        {{{{- '<think>\\\\n' }}}}
+    {{%- endif %}}
+{{%- endif -%}}'''
+    assert nemo_gen_think_old in tmpl_str, '未找到预期的 nemotron add_generation_prompt 思考起手块'
+    tmpl_str = tmpl_str.replace(nemo_gen_think_old, nemo_gen_think_new, 1)
+else:
+    raise RuntimeError(f'未知 template_family={{fam}}：必须在 colab_kernel.py 中接入 universal_effort_block 四档思考支持')
+
+if LORA and LORA.exists():
+    # GCSA-AiLab/GLM-5.3-Flash-Abliterated-LoRA-GGUF 头部写成了 glm5next（缺连字符），原地修补为 glm5-next 并消掉 1 字节对齐填充，保持张量偏移与文件大小不变。
+    with LORA.open('r+b') as _lf:
+        _lbuf = _lf.read(32768)
+        _bad_arch = b'\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00glm5next'
+        _good_arch = b'\\x09\\x00\\x00\\x00\\x00\\x00\\x00\\x00glm5-next'
+        if _bad_arch in _lbuf:
+            _pad_idx = _lbuf.find(b'\\x00' * 8, 16384)
+            assert _pad_idx > 0, 'LoRA GGUF 未找到对齐填充区'
+            _lbuf = _lbuf.replace(_bad_arch, _good_arch, 1)
+            _lbuf = _lbuf[:_pad_idx] + _lbuf[_pad_idx + 1:]
+            _lf.seek(0)
+            _lf.write(_lbuf)
 old_tmpl_on_disk = CHAT_TMPL.read_text(encoding='utf-8') if CHAT_TMPL.exists() else ''
 CHAT_TMPL.write_text(tmpl_str, encoding='utf-8', newline='')
 UI_CFG.write_text(new_ui_text, encoding='utf-8', newline='')
@@ -1048,6 +1300,10 @@ if DRAFT and SPEC.get('mtp_n_max'):
     server_args += ['--model-draft', str(DRAFT), '--spec-type', 'draft-mtp',
                     '--spec-draft-n-max', str(SPEC['mtp_n_max']),
                     '--spec-draft-p-min', str(SPEC['mtp_p_min'])]
+if LORA:
+    server_args += ['--lora', str(LORA)]
+if SPEC.get('extra_server_flags'):
+    server_args += list(SPEC['extra_server_flags'])
 server_args += [
     '--slot-save-path', str(SLOT_SAVE_DIR),
     '--device', 'CUDA0',
@@ -1072,6 +1328,7 @@ server_args += [
     '--top-p', SPEC['top_p'],
     '--top-k', SPEC['top_k'],
     '--min-p', SPEC['min_p'],
+    *SPEC.get('penalty_args', []),
     '--flash-attn', 'on',
     '--cache-type-k', 'q8_0',
     '--cache-type-v', 'q8_0',
@@ -1234,7 +1491,7 @@ for procdir in Path('/proc').iterdir():
     try:
         args = (procdir / 'cmdline').read_bytes().decode().split('\\0')
         if args and Path(args[0]).name == 'llama-server':
-            flags = ('--alias', '--mmproj', '--model-draft', '-c', '--parallel', '--predict', '--spec-draft-n-max', '--spec-draft-p-min', '--reasoning', '--reasoning-effort', '--cache-ram', '--ui-config-file', '--temp', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--repeat-last-n', '--presence-penalty', '--frequency-penalty', '--dry-multiplier', '--dry-base', '--dry-allowed-length', '--dry-penalty-last-n', '--batch-size', '--ubatch-size', '--cache-type-k', '--cache-type-v', '-lm', '--lazy-mode', '-ot')
+            flags = ('--alias', '--mmproj', '--model-draft', '--lora', '-c', '--parallel', '--predict', '--spec-draft-n-max', '--spec-draft-p-min', '--reasoning', '--reasoning-effort', '--cache-ram', '--ui-config-file', '--temp', '--top-p', '--top-k', '--min-p', '--repeat-penalty', '--repeat-last-n', '--presence-penalty', '--frequency-penalty', '--dry-multiplier', '--dry-base', '--dry-allowed-length', '--dry-penalty-last-n', '--batch-size', '--ubatch-size', '--cache-type-k', '--cache-type-v', '-lm', '--lazy-mode', '-ot', '--n-cpu-moe')
             print('实际启动参数:', json.dumps({{k: args[args.index(k) + 1] for k in flags if k in args}}, ensure_ascii=False))
             print('WebUI MCP 代理已启用:', '--ui-mcp-proxy' in args)
     except (FileNotFoundError, PermissionError, IndexError):
@@ -1512,7 +1769,7 @@ def build_switch_code(spec: dict, config: dict) -> str:
 
 def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
     argv = sys.argv[1:] if argv is None else argv
-    spec = MODELS[slug]
+    spec = ALL_MODELS[slug]
     if spec['drive_key'] not in FIELDS:
         FIELDS[spec['drive_key']] = (spec['env_key'], spec['placeholder'])
     config, sanitized, output_dir, sources = load_config(argv)
@@ -1529,7 +1786,7 @@ def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
     nb_path.write_text(nb_json, encoding='utf-8', newline='')
     print('Generated:', nb_path)
 
-    if not sanitized and '--sync-colab' not in argv and output_dir == ROOT_DIR / 'notebooks' and DRIVE_NB_DIR.exists():
+    if not sanitized and '--sync-colab' not in argv and output_dir == ROOT_DIR / 'notebooks' and DRIVE_NB_DIR and DRIVE_NB_DIR.exists():
         drive_nb = DRIVE_NB_DIR / spec['notebook']
         drive_nb.write_text(nb_json, encoding='utf-8', newline='')
         assert drive_nb.read_bytes() == nb_path.read_bytes()
@@ -1542,13 +1799,22 @@ def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
 
 
 def sync_magpie_models():
-    # `magpie provider models <id> <ids…>` 是整体替换：先读现有模型再取并集，移出注册表的模型不会被顺手删掉。
+    # `magpie provider models <id> <ids…>` 是整体替换：先读现有模型（model list + model specs）再取并集，
+    # 同时剔除并 reset 已移入 ARCHIVED_MODELS 的归档模型，确保 Magpie 不残留归档僵尸条目。
     bash_bin = r'C:\Program Files\Git\bin\bash.exe'
     listed = subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie model list'],
                             capture_output=True, text=True, encoding='utf-8', check=True).stdout
-    existing = [tok.split('/', 1)[1] for tok in listed.split() if tok.startswith('qwen-colab/')]
+    specs = subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie model specs'],
+                           capture_output=True, text=True, encoding='utf-8', check=True).stdout
+    existing = [tok.split('/', 1)[1] for tok in (listed + '\n' + specs).split()
+                if tok.startswith('qwen-colab/') and not tok.endswith('/*')]
     aliases = [m['alias'] for m in MODELS.values()]
-    keep = list(dict.fromkeys(existing + aliases))
+    archived_aliases = {m['alias'] for s, m in ARCHIVED_MODELS.items() if s not in MODELS} - set(aliases)
+    keep = [a for a in dict.fromkeys(existing + aliases) if a not in archived_aliases]
+    for arch in sorted(archived_aliases & set(existing)):
+        for sub in ('spec', 'efforts', 'wire', 'name'):
+            subprocess.run([bash_bin, '-lc', f'~/.local/bin/magpie model {sub} qwen-colab/{arch} --reset'],
+                           capture_output=True, check=False)
     subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie provider models qwen-colab ' + ' '.join(keep)], check=True)
     for alias in aliases:
         subprocess.run(
@@ -1561,17 +1827,114 @@ def sync_magpie_models():
         )
 
 
+def probe_hf_repo(repo_id: str, rev: str = 'main') -> None:
+    """Pre-flight HF GGUF inspector: prints pinned rev, LFS sizes/sha256, GGUF tensor count, PLE vs GPU trunk, and chat template."""
+    import struct as _st
+    import urllib.request as _ur
+
+    api_url = f'https://huggingface.co/api/models/{repo_id}/revision/{rev}?blobs=true'
+    req = _ur.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+    with _ur.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    pinned_rev = data.get('sha', rev)
+    print(f'repo: {repo_id} @ {pinned_rev}')
+    for s in data.get('siblings', []):
+        rfn = s.get('rfilename', '')
+        if not rfn.endswith('.gguf'):
+            continue
+        size = int(s.get('size') or 0)
+        lfs = s.get('lfs') or {}
+        sha = lfs.get('sha256') or lfs.get('oid') or ''
+        info_extra = ''
+        try:
+            rurl = f'https://huggingface.co/{repo_id}/resolve/{pinned_rev}/{rfn}'
+            rreq = _ur.Request(rurl, headers={'Range': 'bytes=0-16777215', 'User-Agent': 'Mozilla/5.0'})
+            with _ur.urlopen(rreq, timeout=20) as rr:
+                buf = rr.read()
+            if buf[:4] == b'GGUF':
+                _, n_tensors, n_kv = _st.unpack_from('<IQQ', buf, 4)
+                has_tmpl = b'tokenizer.chat_template' in buf
+                has_ple = b'per_layer_token_embd.weight' in buf
+                info_extra = f' | n_tensors={n_tensors} n_kv={n_kv} tmpl={has_tmpl} ple={has_ple}'
+        except Exception as exc:
+            info_extra = f' | header_err={type(exc).__name__}'
+        print(f'  {rfn} | {size:_} B ({size / (1024**3):.2f} GiB) | sha256={sha}{info_extra}')
+
+
+def yoga_runners_path() -> Path:
+    """Where Colab-yoga reads its runners: <install dir>/colab_kernel_runners.json (COLAB_YOGA_DIR overrides the install dir)."""
+    base = os.environ.get('COLAB_YOGA_DIR')
+    if base:
+        return Path(base) / 'colab_kernel_runners.json'
+    local = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local')))
+    return local / 'Programs' / 'Colab-yoga' / 'colab_kernel_runners.json'
+
+
+def export_yoga_runners(config: dict, out_path: Path | None = None) -> None:
+    """Export headless cell-1 runner scripts for all active MODELS to Colab-yoga's install directory.
+
+    Skipped with a hint when Colab-yoga is not installed (its directory does not exist); the file is only
+    useful to that app, so nothing is created on its behalf.
+    """
+    dst = out_path or yoga_runners_path()
+    if not dst.parent.exists():
+        print(f'Colab-yoga not installed ({dst.parent} missing); skipped exporting runners. '
+              'Optional app: https://github.com/incredible404-rgb/Colab-yoga')
+        return
+    marker = '就绪横幅 + WebUI 标签页 + 停机按钮'
+    runners = {}
+    for slug, spec in MODELS.items():
+        nb = build_notebook_dict(spec, config, with_switch=False)
+        cell = ''.join(next(c['source'] for c in nb['cells'] if c['metadata'].get('id') == 'persistent-setup'))
+        cut = cell.find(marker)
+        if cut > 0:
+            cell = cell[:cell.rfind('\n', 0, cut) + 1]
+        runners[slug] = {
+            'slug': slug,
+            'alias': spec['alias'],
+            'title': spec['title'],
+            'root_dir': spec['root_dir'],
+            'min_vram_mib': spec['min_vram_mib'],
+            'files': [
+                {
+                    'name': f['path'],
+                    'bname': Path(f['path']).name,
+                    'local_subdir': f.get('local_subdir', ''),
+                    'size': f['size'],
+                    'role': f['role'],
+                }
+                for f in spec['files']
+            ],
+            'code': cell,
+        }
+    dst.write_text(json.dumps(runners, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='')
+    print('Exported Colab-yoga runners to:', dst)
+
+
 def run_single(slug: str):
     generate_one(slug)
 
 
 def main():
     args = sys.argv[1:]
+    if '--probe-hf' in args:
+        idx = args.index('--probe-hf')
+        repo = args[idx + 1]
+        rev = args[idx + 2] if idx + 2 < len(args) and not args[idx + 2].startswith('-') else 'main'
+        probe_hf_repo(repo, rev)
+        return
+    if '--list' in args:
+        print('Active MODELS:', ', '.join(f"{k} ({v['alias']})" for k, v in MODELS.items()))
+        print('Archived ARCHIVED_MODELS:', ', '.join(f"{k} ({v['alias']})" for k, v in ARCHIVED_MODELS.items()))
+        return
     targets = list(MODELS.keys()) if ('--all' in args or not [a for a in args if not a.startswith('-')]) else [a for a in args if not a.startswith('-')]
     for slug in targets:
-        if slug not in MODELS:
-            raise SystemExit(f'Unknown model slug: {slug}. Available: {", ".join(MODELS)}')
+        if slug not in ALL_MODELS:
+            raise SystemExit(f'Unknown model slug: {slug}. Active: {", ".join(MODELS)} | Archived: {", ".join(ARCHIVED_MODELS)}')
         generate_one(slug, args)
+    if '--sanitized' not in args:
+        cfg, _, _, _ = load_config([])
+        export_yoga_runners(cfg)
     if '--sync-magpie' in args:
         sync_magpie_models()
 

@@ -3,7 +3,7 @@
   python scripts/colab_cli.py start     [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
   python scripts/colab_cli.py launch    [<slug>] [--gpu G4] [--idle-min 45]
   python scripts/colab_cli.py verify    [<slug>]
-  python scripts/colab_cli.py easycolab [gui | wake | status | stop] [--gpu G4] [--idle-min 45]
+  python scripts/colab_cli.py yoga      [gui | wake | status | stop] [--gpu G4] [--idle-min 45]   (alias: easycolab)
   python scripts/colab_cli.py status
   python scripts/colab_cli.py stop      [<slug> | --all]
 
@@ -366,7 +366,7 @@ def launch_exec_code(cell: str) -> str:
 
 
 def _reuse_active_session_as(slug: str, gpu: str, active: list[str]) -> bool:
-    """If another active session (e.g. 'easycolab') is already running on the same GPU, alias it to slug in sessions.json."""
+    """If another active session (e.g. the Colab-yoga one) is already running on the same GPU, alias it to slug in sessions.json."""
     sess_file = CLI_DIR / 'sessions.json'
     if not sess_file.exists():
         return False
@@ -587,37 +587,46 @@ def cmd_stop(names: list[str]):
 
 
 _PROGRAMS = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'Programs'
-EASYCOLAB_DIR = _PROGRAMS / 'Colab-yoga' if (_PROGRAMS / 'Colab-yoga/Colab-yoga.exe').exists() else _PROGRAMS / 'EasyColab'
-EASYCOLAB_EXE = (EASYCOLAB_DIR / 'Colab-yoga.exe') if (EASYCOLAB_DIR / 'Colab-yoga.exe').exists() else (EASYCOLAB_DIR / 'EasyColab.exe')
-EASYCOLAB_PY = (EASYCOLAB_DIR / 'runtime/python.exe') if (EASYCOLAB_DIR / 'runtime/python.exe').exists() else (EASYCOLAB_DIR / '_internal/runtime/python.exe')
-EASYCOLAB_BRIDGE = (EASYCOLAB_DIR / 'bridge/colab_yoga_bridge.py') if (EASYCOLAB_DIR / 'bridge/colab_yoga_bridge.py').exists() else (EASYCOLAB_DIR / '_internal/colab_bridge.py')
+# Colab-yoga (https://github.com/incredible404-rgb/Colab-yoga) installs to %LOCALAPPDATA%/Programs/Colab-yoga;
+# COLAB_YOGA_DIR overrides the location for portable or custom installs.
+YOGA_DIR = Path(os.environ.get('COLAB_YOGA_DIR') or (_PROGRAMS / 'Colab-yoga'))
+YOGA_EXE = YOGA_DIR / 'Colab-yoga.exe'
+YOGA_PY = YOGA_DIR / 'runtime/python.exe'
+YOGA_BRIDGE = YOGA_DIR / 'bridge/colab_yoga_bridge.py'
+# Name under which the Colab-yoga bridge registers its session in ~/.config/colab-cli/sessions.json.
+# Its current build still writes 'easycolab' (an inherited string, not an install path); both are accepted.
+YOGA_SESSION_NAMES = ('colab-yoga', 'easycolab')
 
 
-def cmd_easycolab(rest: list[str]) -> int:
-    if not EASYCOLAB_EXE.exists():
-        raise SystemExit('EasyColab not found at %s' % EASYCOLAB_EXE)
+def cmd_yoga(rest: list[str]) -> int:
+    if not YOGA_EXE.exists():
+        raise SystemExit(
+            'Colab-yoga not found at %s\n'
+            'Install it from https://github.com/incredible404-rgb/Colab-yoga (Windows tray app; it installs to '
+            '%%LOCALAPPDATA%%\\Programs\\Colab-yoga), or set COLAB_YOGA_DIR to an existing install. '
+            'Colab-yoga is optional: start/launch/status/stop work without it.' % YOGA_EXE)
     opt = lambda flag, default: rest[rest.index(flag) + 1] if flag in rest else default  # noqa: E731
     pos = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] not in ('--gpu', '--idle-min'))]
     sub = pos[0] if pos else 'gui'
     if sub == 'gui':
-        subprocess.Popen([str(EASYCOLAB_EXE)], cwd=str(EASYCOLAB_DIR))
-        print('[colab_cli] EasyColab GUI launched (%s)' % EASYCOLAB_EXE, flush=True)
+        subprocess.Popen([str(YOGA_EXE)], cwd=str(YOGA_DIR))
+        print('[colab_cli] Colab-yoga GUI launched (%s)' % YOGA_EXE, flush=True)
         return 0
     if sub == 'status':
-        return subprocess.run([str(EASYCOLAB_PY), '-u', str(EASYCOLAB_BRIDGE), 'auth_status'], env=ENV).returncode
+        return subprocess.run([str(YOGA_PY), '-u', str(YOGA_BRIDGE), 'auth_status'], env=ENV).returncode
     if sub == 'stop':
         return cmd_stop(['--all'])
     if sub == 'wake':
         gpu = opt('--gpu', 'G4')
         idle_min = int(opt('--idle-min', 45))
-        rc = subprocess.run([str(EASYCOLAB_PY), '-u', str(EASYCOLAB_BRIDGE), 'wake', '--gpu', gpu], env=ENV).returncode
+        rc = subprocess.run([str(YOGA_PY), '-u', str(YOGA_BRIDGE), 'wake', '--gpu', gpu], env=ENV).returncode
         if rc == 0:
             active = [s for s in sessions() if s != '?']
-            target = 'easycolab' if 'easycolab' in active else (active[0] if active else None)
+            target = next((n for n in YOGA_SESSION_NAMES if n in active), active[0] if active else None)
             if target:
                 start_keepalive(target, idle_min)
         return rc
-    raise SystemExit('unknown easycolab action %s (expected: gui | wake | status | stop)' % sub)
+    raise SystemExit('unknown yoga action %s (expected: gui | wake | status | stop)' % sub)
 
 
 def main(argv: list[str]):
@@ -627,8 +636,8 @@ def main(argv: list[str]):
     cmd, rest = argv[0], argv[1:]
     opt = lambda flag, default: rest[rest.index(flag) + 1] if flag in rest else default  # noqa: E731
     pos = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] not in ('--gpu', '--idle-min'))]
-    if cmd in ('easycolab', 'colab-yoga'):
-        return cmd_easycolab(rest)
+    if cmd in ('yoga', 'colab-yoga', 'easycolab'):  # 'easycolab' is the pre-rename alias, kept for old scripts
+        return cmd_yoga(rest)
     if cmd in ('start', 'verify', 'launch'):
         from colab_kernel import ALL_MODELS, MODELS
         slug = pos[0] if pos else next(iter(MODELS))

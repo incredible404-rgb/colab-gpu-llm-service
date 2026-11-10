@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from secrets_config import ROOT_DIR, guard_sync, load_config, report
 
-DRIVE_NB_DIR = Path('G:/My Drive/Colab Notebooks')
+DRIVE_NB_DIR = Path(os.environ.get('COLAB_NOTEBOOKS_DIR') or 'G:/My Drive/Colab Notebooks')
 NOTEBOOK = 'qwen3.8-flash-next-strata-g4-colab.ipynb'
 
 OVERVIEW = """# Strata · Qwen3.8-Flash-Next UD-IQ4_XS-v31（实验，未在本机实测）
