@@ -1,8 +1,12 @@
 """Isolated tests for local_novel_mcp tools; every test runs against a throwaway NOVEL_ROOT."""
+import http.client
 import json
+import os
 import shutil
+import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -137,6 +141,297 @@ class NovelToolsTest(unittest.TestCase):
         self.assertIn('总行数', out)
         self.assertIn('本轮净汉字', out)
         self.assertIn('第三章', call('outline_novel_file', path=NOVEL))
+
+
+def _age(path, seconds=60):
+    """Back-date a file so the lines cache treats it as settled (not racily clean)."""
+    ns = time.time_ns() - seconds * 1_000_000_000
+    os.utime(path, ns=(ns, ns))
+
+
+class LinesCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='novel-cache-test-'))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _file(self, name, text, aged=True):
+        p = self.tmp / name
+        p.write_bytes(text.encode('utf-8') if isinstance(text, str) else text)
+        if aged:
+            _age(p)
+        return p
+
+    def test_hit_then_invalidated_by_size_or_mtime(self):
+        cache = m._LinesCache()
+        p = self._file('a.md', '一\n二\n')
+        self.assertEqual(cache.get(p).lines, ('一', '二'))
+        cache.get(p)
+        self.assertEqual((cache.hits, cache.misses), (1, 1))
+        p.write_bytes('一\n二\n三\n'.encode('utf-8'))
+        _age(p, 30)
+        self.assertEqual(cache.get(p).lines, ('一', '二', '三'))
+        same_size = '甲\n乙\n丙\n'
+        p.write_bytes(same_size.encode('utf-8'))
+        _age(p, 10)
+        self.assertEqual(cache.get(p).lines, ('甲', '乙', '丙'))
+        self.assertEqual(cache.misses, 3)
+
+    def test_racy_young_file_is_never_served_stale(self):
+        cache = m._LinesCache()
+        p = self._file('young.md', 'aaa\n', aged=False)
+        self.assertEqual(cache.get(p).lines, ('aaa',))
+        p.write_bytes(b'bbb\n')  # same size, same coarse timestamp possible
+        self.assertEqual(cache.get(p).lines, ('bbb',))
+        self.assertEqual(cache.hits, 0)
+
+    def test_bounded_by_entries_and_cost(self):
+        cache = m._LinesCache(max_cost=10_000, max_entries=3)
+        paths = [self._file(f'{i}.md', f'line {i}\n') for i in range(6)]
+        for p in paths:
+            cache.get(p)
+        self.assertLessEqual(len(cache._items), 3)
+        big = self._file('big.md', 'x' * 20_000)
+        cache.get(big)
+        self.assertNotIn(str(big), cache._items)
+        self.assertLessEqual(cache._cost, cache.max_cost)
+        cache.get(paths[-1])
+        self.assertGreaterEqual(cache.hits, 1)
+        cache.clear()
+        self.assertEqual((len(cache._items), cache._cost), (0, 0))
+
+    def test_threads_share_one_cache(self):
+        cache = m._LinesCache(max_cost=50_000, max_entries=4)
+        paths = [self._file(f'{i}.md', ''.join(f'{i}-{k}\n' for k in range(50))) for i in range(8)]
+        errors = []
+
+        def work():
+            try:
+                for _ in range(200):
+                    for i, p in enumerate(paths):
+                        assert cache.get(p).lines[0] == f'{i}-0'
+            except Exception as err:  # pragma: no cover - reported below
+                errors.append(err)
+
+        threads = [threading.Thread(target=work) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertLessEqual(len(cache._items), 4)
+        self.assertEqual(cache._cost, sum(e.cost for _, e in cache._items.values()))
+
+    def test_decoding_matches_text_mode_splitlines(self):
+        samples = [
+            '一\r\n二\r\n', '甲\r乙\r丙', 'a\x0bb\x0cc\x1cd\x1de\x1ef\x85g h i\n', '﻿BOM\n正文', '',
+            '\n\n', 'x\r\r\ny\n\r', b'ok\xffbad\xc3\n\xe4\xb8',
+        ]
+        cache = m._LinesCache()
+        for i, sample in enumerate(samples):
+            p = self._file(f's{i}.md', sample)
+            expect = p.read_text(encoding='utf-8', errors='replace').splitlines()
+            self.assertEqual(list(cache.get(p).lines), expect, repr(sample))
+
+    def test_hanzi_prefix_matches_section_counts(self):
+        p = self._file('h.md', '# 书\n你好a\n\n世界，ok\n')
+        entry = m._LinesCache().get(p)
+        text = p.read_text(encoding='utf-8')
+        prefix = entry.hanzi_prefix()
+        self.assertEqual(prefix[-1], m._count_hanzi(text))
+        for start in range(1, len(entry.lines) + 1):
+            for end in range(start, len(entry.lines) + 1):
+                self.assertEqual(prefix[end] - prefix[start - 1], m._count_hanzi('\n'.join(entry.lines[start - 1:end])))
+
+
+class WalkEquivalenceTest(unittest.TestCase):
+    """The pruned walk must list exactly what the old rglob + filter did, in the same order."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='novel-walk-test-')).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._orig = m.NOVEL_ROOT
+        m.NOVEL_ROOT = self.tmp
+        self.addCleanup(setattr, m, 'NOVEL_ROOT', self._orig)
+        for rel in [
+            'a/x.md', 'a.md', 'a-b.md', 'A/Y.TXT', 'b/c/d.md', 'b/c/e.txt', 'b/skip.png', 'b/.hidden.md',
+            '.git/config.md', 'archive/old.md', 'archive/.snapshots/b/x.md.20260101-000000.bak', 'b/archive/n.md',
+            'b/archive.md', 'z/archive/q/r.md', '.snapshots/s.md', 'b/.cache/t.md', '文/章.md', 'b/c.d.md',
+        ]:
+            f = self.tmp / rel
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text('内容\n', encoding='utf-8')
+
+    def _reference(self, base, include_archive):
+        out = []
+        for p in sorted(base.rglob('*')):
+            if not p.is_file() or p.suffix.lower() not in ('.md', '.txt'):
+                continue
+            parts = p.relative_to(m.NOVEL_ROOT).parts
+            if any(part.startswith('.') for part in parts):
+                continue
+            if not include_archive and 'archive' in parts:
+                continue
+            out.append(p)
+        return out
+
+    def test_matches_rglob_filter_for_every_directory(self):
+        dirs = [self.tmp] + [p for p in self.tmp.rglob('*') if p.is_dir()]
+        for base in dirs:
+            for include_archive in (False, True):
+                self.assertEqual(m._md_files(base, include_archive), self._reference(base, include_archive), (base, include_archive))
+
+    def test_list_tool_matches_old_filter(self):
+        out = call('list_novel_files')
+        expect = [p.relative_to(self.tmp).as_posix() for p in self._reference(self.tmp, False)]
+        self.assertEqual([line.split('  (')[0] for line in out.splitlines()], expect)
+        self.assertIn('(1 行, ', out.splitlines()[0])
+        self.assertEqual(call('list_novel_files', folder='archive'), '未找到 .md / .txt 文件')
+        self.assertEqual(call('list_novel_files', folder='a.md'), '未找到 .md / .txt 文件')
+
+    def test_grep_dedupes_overlapping_paths_in_order(self):
+        out = call('grep_reference', query='内容', paths=['b', 'b/c', 'b/c/d.md'], max_matches=60)
+        self.assertIn('共搜 %d 个文件' % len(self._reference(self.tmp / 'b', False)), out)
+
+
+class AuditIndexTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='novel-audit-test-')).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.audit = self.tmp / 'write_audit.jsonl'
+
+    def _row(self, path, status='ok', tool='write_novel_file', **extra):
+        return json.dumps(dict({'tool': tool, 'path': path, 'status': status, 'mode': 'append'}, **extra), ensure_ascii=False) + '\n'
+
+    def _full(self, rel):
+        rows = []
+        for line in self.audit.read_text(encoding='utf-8').splitlines():
+            try:
+                rec = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            if rec.get('tool') == 'write_novel_file' and rec.get('status') == 'ok' \
+                    and str(rec.get('path') or '').replace('\\', '/').lstrip('/') == rel:
+                rows.append(rec)
+        return rows
+
+    def test_incremental_equals_full_parse(self):
+        index = m._AuditIndex()
+        self.audit.write_text(self._row('b/x.md', n=1) + self._row('b/y.md') + 'not json\n' + self._row('b\\x.md', status='rejected'),
+                              encoding='utf-8', newline='')
+        self.assertEqual(index.rows_for(self.audit, 'b/x.md'), self._full('b/x.md'))
+        with self.audit.open('ab') as fh:
+            fh.write(self._row('/b/x.md', n=2).encode('utf-8'))
+            fh.write(self._row('c.md', tool='edit_novel_file').encode('utf-8'))
+        got = index.rows_for(self.audit, 'b/x.md')
+        self.assertEqual(got, self._full('b/x.md'))
+        self.assertEqual([r['n'] for r in got], [1, 2])
+        self.assertEqual(index.rows_for(self.audit, 'c.md'), [])
+        self.assertEqual(index.offset, self.audit.stat().st_size)
+
+    def test_torn_last_line_is_seen_but_not_committed(self):
+        index = m._AuditIndex()
+        whole = self._row('b/x.md', n=1)
+        full_row = self._row('b/x.md', n=2)
+        self.audit.write_bytes((whole + full_row[:-1]).encode('utf-8'))  # last row lacks its newline
+        self.assertEqual([r['n'] for r in index.rows_for(self.audit, 'b/x.md')], [1, 2])
+        self.assertEqual(index.offset, len(whole.encode('utf-8')))
+        with self.audit.open('ab') as fh:
+            fh.write(b'\n')
+        self.assertEqual([r['n'] for r in index.rows_for(self.audit, 'b/x.md')], [1, 2])
+        self.assertEqual(index.offset, self.audit.stat().st_size)
+        self.audit.write_bytes((whole + '{"tool": "write_novel_file", "pa').encode('utf-8'))  # shrank + new torn tail
+        self.assertEqual([r['n'] for r in index.rows_for(self.audit, 'b/x.md')], [1])
+
+    def test_rewrite_or_other_file_rebuilds(self):
+        index = m._AuditIndex()
+        self.audit.write_text(self._row('b/x.md', n=1) + self._row('b/x.md', n=2), encoding='utf-8', newline='')
+        self.assertEqual(len(index.rows_for(self.audit, 'b/x.md')), 2)
+        # different bytes under the already-parsed prefix, then growth: the tail check must notice the rewrite
+        self.audit.write_text(self._row('b/x.md', n=7) + self._row('b/x.md', n=8) + self._row('b/x.md', n=9),
+                              encoding='utf-8', newline='')
+        self.assertEqual([r['n'] for r in index.rows_for(self.audit, 'b/x.md')], [7, 8, 9])
+        other = self.tmp / 'other.jsonl'
+        other.write_text(self._row('b/x.md', n=5), encoding='utf-8', newline='')
+        self.assertEqual([r['n'] for r in index.rows_for(other, 'b/x.md')], [5])
+
+    def test_bad_utf8_raises_and_does_not_double_count_later(self):
+        index = m._AuditIndex()
+        self.audit.write_bytes(self._row('b/x.md', n=1).encode('utf-8') + b'\xff\xfe\n')
+        with self.assertRaises(UnicodeDecodeError):
+            index.rows_for(self.audit, 'b/x.md')
+        self.audit.write_bytes(self._row('b/x.md', n=1).encode('utf-8'))
+        self.assertEqual([r['n'] for r in index.rows_for(self.audit, 'b/x.md')], [1])
+
+
+class HttpKeepAliveTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = m.ThreadingHTTPServer(('127.0.0.1', 0), m.MCPHandler)
+        cls.port = cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def _post(self, conn, payload):
+        conn.request('POST', '/mcp', body=json.dumps(payload), headers={'Content-Type': 'application/json'})
+        return conn.getresponse()
+
+    def test_many_requests_share_one_connection(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.connect()
+        sock = conn.sock
+        for i in range(20):
+            resp = self._post(conn, {'jsonrpc': '2.0', 'id': i, 'method': 'ping'})
+            self.assertEqual(resp.version, 11)
+            self.assertEqual(json.loads(resp.read()), {'jsonrpc': '2.0', 'id': i, 'result': {}})
+            self.assertIs(conn.sock, sock)
+        resp = self._post(conn, {'jsonrpc': '2.0', 'method': 'notifications/initialized'})
+        self.assertEqual((resp.status, resp.read()), (202, b''))
+        conn.request('GET', '/health')
+        resp = conn.getresponse()
+        self.assertTrue(json.loads(resp.read())['ok'])
+        conn.request('OPTIONS', '/mcp', headers={'Origin': 'http://x', 'Access-Control-Request-Headers': 'x-a'})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 204)
+        self.assertEqual(resp.getheader('Access-Control-Allow-Private-Network'), 'true')
+        resp.read()
+        conn.request('DELETE', '/mcp')
+        resp = conn.getresponse()
+        self.assertEqual((resp.status, resp.read()), (200, b''))
+        conn.request('GET', '/nope')
+        resp = conn.getresponse()
+        self.assertEqual((resp.status, resp.read()), (405, b''))
+        self.assertIs(conn.sock, sock)
+        conn.close()
+
+    def test_http10_client_and_connection_close_still_work(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.request('POST', '/mcp', body=json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}),
+                     headers={'Connection': 'close'})
+        resp = conn.getresponse()
+        self.assertEqual(len(json.loads(resp.read())['result']['tools']), len(m.TOOLS))
+        conn.close()
+        with socket.create_connection(('127.0.0.1', self.port), timeout=10) as raw:
+            raw.sendall(b'GET /health HTTP/1.0\r\n\r\n')
+            data = b''
+            while chunk := raw.recv(4096):
+                data += chunk
+        self.assertTrue(data.startswith(b'HTTP/1.0 200') or data.startswith(b'HTTP/1.1 200'))
+        self.assertIn(b'"ok": true', data)
+
+    def test_bad_json_keeps_the_stream_usable(self):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        conn.request('POST', '/mcp', body='{nope')
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        resp.read()
+        resp = self._post(conn, {'jsonrpc': '2.0', 'id': 2, 'method': 'ping'})
+        self.assertEqual(resp.status, 200)
+        resp.read()
+        conn.close()
 
 
 if __name__ == '__main__':

@@ -52,6 +52,7 @@ BEAT_FAIL_LOG_EVERY = 10
 BEAT_CODE = "open('/content/.keepalive_beat', 'w').write(str(__import__('time').time()))\n"
 CREATE_NO_WINDOW = 0x08000000
 MAX_HOURS = 24
+LOG_MAX_BYTES = 256 * 1024
 PING_TIMEOUT_S = 10
 SLOT_TOKEN_KEYS = ('n_past', 'n_decoded', 'n_prompt_tokens')
 SLOT_TIME_KEYS = ('last_request_time', 't_last_used', 'last_used')
@@ -124,6 +125,21 @@ def inference_active(slots, prev) -> tuple:
     if busy or tokens != prev[1] or stamps != prev[2]:
         return True, fp
     return False, fp
+
+
+def rotate_log(path: Path, max_bytes: int = LOG_MAX_BYTES) -> bool:
+    """Bound the log: past max_bytes it becomes <name>.1 (replacing the previous .1) and a new log starts.
+
+    The log is appended across runs of the same session name and was never trimmed. Best effort: a reader
+    holding the file open on Windows makes os.replace fail, and that is not worth stopping the daemon for.
+    """
+    try:
+        if path.stat().st_size <= max_bytes:
+            return False
+        os.replace(path, path.with_name(path.name + '.1'))
+    except OSError:
+        return False
+    return True
 
 
 def _paths(session: str):
@@ -227,8 +243,12 @@ def refresh_endpoint(state, session, current, apply_proxy):
     if endpoint not in by_endpoint:
         return None
     if local is not None:
+        token, url = local.token, local.url
         apply_proxy(local, by_endpoint[endpoint].runtime_proxy_info)
-        state.store.add(local)
+        # Same proxy token and url: the stored expiry is still the conservative one (the CLI refreshes on
+        # its own near expiry), and add() would take the exclusive lock and rewrite sessions.json for nothing.
+        if local.token != token or local.url != url:
+            state.store.add(local)
     return endpoint
 
 
@@ -240,6 +260,8 @@ def main(argv: list[str]) -> int:
     spawn = argv[3] if len(argv) > 3 else os.environ.get('COLAB_KEEPALIVE_SPAWN', 'direct')
     cfg, state_file, log_file = _paths(session)
     cfg.mkdir(parents=True, exist_ok=True)
+
+    rotate_log(log_file)
 
     def log(msg: str) -> None:
         with log_file.open('a', encoding='utf-8', newline='\n') as handle:
@@ -288,6 +310,7 @@ def main(argv: list[str]) -> int:
     pings = 0
     beats = beat_fails = 0
     last_ping = None
+    slots_http = requests.Session()  # one kept-alive connection to /slots instead of a new TCP connect per minute
     beat_file = cfg / ('keepalive-%s-beat.py' % session)
     beat_file.write_text(BEAT_CODE, encoding='utf-8', newline='\n')
     exit_reason = 'loop_ended'
@@ -308,6 +331,7 @@ def main(argv: list[str]) -> int:
                 time.sleep(max(0.0, BEAT_INTERVAL_S - (time.monotonic() - cycle_start)))
                 continue
             last_ping = cycle_start
+            rotate_log(log_file)
             try:
                 refresh_oauth(state.client, log)
                 refreshed = refresh_endpoint(state, session, endpoint, apply_proxy)
@@ -340,7 +364,7 @@ def main(argv: list[str]) -> int:
                 log('keep_alive_error n=%d result=transient detail=%s' % (pings, detail))
             busy = None
             try:
-                slots = requests.get(slots_url, headers=slots_hdr, timeout=10).json()
+                slots = slots_http.get(slots_url, headers=slots_hdr, timeout=10).json()
                 if isinstance(slots, dict):
                     slots = slots.get('slots') or slots.get('data') or []
                 active, prev_fp = inference_active(slots, prev_fp)
@@ -377,6 +401,7 @@ def main(argv: list[str]) -> int:
         log('crashed: %r' % err)
         raise
     finally:
+        slots_http.close()
         beat_file.unlink(missing_ok=True)
         if spawn == 'schtasks':
             delete_schtask(session)

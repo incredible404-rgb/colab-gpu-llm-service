@@ -72,6 +72,11 @@ def _save_state(state):
     os.replace(tmp, STATE_FILE)
 
 
+def needs_backfill(state):
+    """True when some record still lacks its endpoints or its burn rate, i.e. backfill_sessions has work to do."""
+    return any(not s['endpoints'] or not s['rate_hourly'] > 0 for s in state['sessions'])
+
+
 def backfill_sessions(state, snap):
     """Fill in the late-arriving endpoints / burn rate of sessions recorded while the VM was still allocating.
 
@@ -171,8 +176,10 @@ def stop_and_report(session=None, kill_all=False):
 
     endpoints = None
     if named:
-        # read-only snapshot first: a session recorded during VM allocation may only now have its endpoints
-        if backfill_sessions(state, colab_sync.colab_status()):
+        # read-only snapshot first: a session recorded during VM allocation may only now have its endpoints.
+        # Skipped when every record is complete: backfill_sessions could not change anything, and the snapshot
+        # costs a whole browser round trip before colab_unassign makes its own.
+        if needs_backfill(state) and backfill_sessions(state, colab_sync.colab_status()):
             _save_state(state)
             chosen = [s for s in state['sessions'] if s['label'] == session]
         endpoints = [e for s in chosen for e in s['endpoints']]

@@ -12,6 +12,9 @@ import os
 import re
 import shutil
 import sys
+import threading
+import time
+from collections import OrderedDict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +38,87 @@ def _safe_path(rel_path: str) -> Path:
     if NOVEL_ROOT not in target.parents and target != NOVEL_ROOT:
         raise ValueError(f'路径超出允许的小说根目录 ({NOVEL_ROOT}): {rel_path}')
     return target
+
+
+class _FileLines:
+    """Decoded lines of one file plus lazily built cumulative hanzi counts. Treat as read-only."""
+
+    __slots__ = ('lines', 'size', 'cost', '_hanzi')
+
+    def __init__(self, lines: tuple, size: int):
+        self.lines = lines
+        self.size = size
+        self.cost = size + 100 * len(lines)
+        self._hanzi: list | None = None
+
+    def hanzi_prefix(self) -> list:
+        """prefix[i] = hanzi in lines[:i]; a section's count is prefix[end] - prefix[start - 1]."""
+        prefix = self._hanzi
+        if prefix is None:
+            prefix = [0]
+            total = 0
+            for line in self.lines:
+                total += len(_HANZI_RE.findall(line))
+                prefix.append(total)
+            self._hanzi = prefix
+        return prefix
+
+
+class _LinesCache:
+    """Bounded LRU of decoded file lines, validated against (mtime_ns, size) on every hit.
+
+    A file whose mtime is younger than RACY_NS is never stored: a rewrite of equal size inside the
+    filesystem's timestamp granularity could otherwise be served stale (the same rule git uses for
+    "racily clean" index entries). Reads happen outside the lock; a lost race only costs a re-read.
+    """
+
+    RACY_NS = 2_000_000_000
+
+    def __init__(self, max_cost: int = 64 << 20, max_entries: int = 256):
+        self.max_cost = max_cost
+        self.max_entries = max_entries
+        self._lock = threading.Lock()
+        self._items: OrderedDict = OrderedDict()
+        self._cost = 0
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, p: Path) -> _FileLines:
+        key = str(p)
+        st = os.stat(key)
+        stamp = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            hit = self._items.get(key)
+            if hit is not None and hit[0] == stamp:
+                self._items.move_to_end(key)
+                self.hits += 1
+                return hit[1]
+            self.misses += 1
+        text = Path(key).read_bytes().decode('utf-8', errors='replace')
+        entry = _FileLines(tuple(text.splitlines()), st.st_size)
+        if time.time_ns() - st.st_mtime_ns >= self.RACY_NS and entry.cost <= self.max_cost:
+            with self._lock:
+                old = self._items.pop(key, None)
+                if old is not None:
+                    self._cost -= old[1].cost
+                self._items[key] = (stamp, entry)
+                self._cost += entry.cost
+                while self._items and (self._cost > self.max_cost or len(self._items) > self.max_entries):
+                    _, (_, dropped) = self._items.popitem(last=False)
+                    self._cost -= dropped.cost
+        return entry
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._cost = 0
+
+
+_LINES = _LinesCache()
+
+
+def _file_lines(p: Path) -> _FileLines:
+    return _LINES.get(p)
 
 
 SNAPSHOT_KEEP = 30
@@ -400,28 +484,76 @@ def _strip_pause_tail(text: str) -> str:
     return prose + nl + nl
 
 
+class _AuditIndex:
+    """Successful write_novel_file rows of write_audit.jsonl, grouped by normalised path.
+
+    The log is append-only, so a call only parses the bytes added since the previous one. The index is
+    rebuilt from scratch when the file moved to another path, shrank, or no longer matches the bytes
+    that ended the previously parsed prefix. A final line without a newline is parsed on every call but
+    never committed, so a half-written row is picked up once it is complete.
+    """
+
+    TAIL = 64
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._reset(None)
+
+    def _reset(self, path) -> None:
+        self.path = path
+        self.offset = 0
+        self.tail = b''
+        self.rows: dict[str, list[dict]] = {}
+
+    @staticmethod
+    def _parse(line: bytes):
+        text = line.decode('utf-8').strip()
+        if not text:
+            return None
+        try:
+            rec = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if rec.get('tool') != 'write_novel_file' or rec.get('status') != 'ok':
+            return None
+        return str(rec.get('path') or '').replace('\\', '/').lstrip('/'), rec
+
+    def rows_for(self, audit: Path, rel_posix: str) -> list[dict]:
+        key = str(audit)
+        with self._lock:
+            with audit.open('rb') as fh:
+                size = os.fstat(fh.fileno()).st_size
+                if self.path != key or size < self.offset:
+                    self._reset(key)
+                if self.offset:
+                    fh.seek(self.offset - len(self.tail))
+                    if fh.read(len(self.tail)) != self.tail:
+                        self._reset(key)
+                fh.seek(self.offset)
+                chunk = fh.read()
+            done = chunk.rfind(b'\n') + 1
+            fresh = [parsed for parsed in map(self._parse, chunk[:done].split(b'\n')) if parsed is not None]
+            for path, rec in fresh:
+                self.rows.setdefault(path, []).append(rec)
+            if done:
+                self.offset += done
+                self.tail = (self.tail + chunk[:done])[-self.TAIL:]
+            rows = list(self.rows.get(rel_posix, ()))
+            if done < len(chunk):
+                parsed = self._parse(chunk[done:])
+                if parsed is not None and parsed[0] == rel_posix:
+                    rows.append(parsed[1])
+            return rows
+
+
+_AUDIT = _AuditIndex()
+
+
 def _ok_novel_writes(rel: str) -> list[dict]:
     audit = NOVEL_ROOT / 'archive' / '.snapshots' / 'write_audit.jsonl'
     if not audit.is_file():
         return []
-    rel_posix = rel.replace('\\', '/').lstrip('/')
-    rows: list[dict] = []
-    with audit.open('r', encoding='utf-8') as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            path = str(rec.get('path') or '').replace('\\', '/').lstrip('/')
-            if rec.get('tool') != 'write_novel_file' or rec.get('status') != 'ok':
-                continue
-            if path != rel_posix:
-                continue
-            rows.append(rec)
-    return rows
+    return _AUDIT.rows_for(audit, rel.replace('\\', '/').lstrip('/'))
 
 
 def _resolve_backup_file(backup_rel: str | None) -> Path | None:
@@ -772,25 +904,46 @@ def _move_with_snapshots(src: Path, dst: Path) -> int:
     return len(backups)
 
 
+def _text_files(base: Path, include_archive: bool) -> list[Path]:
+    """.md / .txt files under directory base, sorted as sorted(base.rglob('*')) would.
+
+    Hidden entries (any path part from NOVEL_ROOT starting with '.') and, unless include_archive, anything
+    below an 'archive' part are skipped. Those directories are pruned instead of walked: archive/.snapshots
+    and archive/.trash hold most of the files in a long-lived novel root and were listed only to be dropped.
+    """
+    prefix = base.relative_to(NOVEL_ROOT).parts
+    if any(part.startswith('.') for part in prefix) or (not include_archive and 'archive' in prefix):
+        return []
+    out: list[Path] = []
+    stack = [str(base)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name.startswith('.'):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if include_archive or name != 'archive':
+                    stack.append(entry.path)
+            elif name.lower().endswith(('.md', '.txt')) and entry.is_file():
+                out.append(Path(entry.path))
+    return sorted(out)
+
+
 def _md_files(base: Path, include_archive: bool) -> list[Path]:
     if base.is_file():
         return [base]
-    out = []
-    for p in sorted(base.rglob('*')):
-        if not p.is_file() or p.suffix.lower() not in ('.md', '.txt'):
-            continue
-        parts = p.relative_to(NOVEL_ROOT).parts
-        if any(part.startswith('.') for part in parts):
-            continue
-        if not include_archive and 'archive' in parts:
-            continue
-        out.append(p)
-    return out
+    return _text_files(base, include_archive)
 
 
 def _outline_one(p: Path, max_level: int) -> str:
-    text = p.read_bytes().decode('utf-8', errors='replace')
-    lines = text.splitlines()
+    entry = _file_lines(p)
+    lines = entry.lines
+    hanzi_at = entry.hanzi_prefix()
     heads = []
     for i, line in enumerate(lines, 1):
         m = _MD_HEADING_RE.match(line)
@@ -799,7 +952,7 @@ def _outline_one(p: Path, max_level: int) -> str:
     if not heads:
         # Plain-text originals mark chapters without '#'; treat those lines as level-2 headings.
         heads = [(i, 2, line.strip()) for i, line in enumerate(lines, 1) if _PLAIN_CHAPTER_RE.match(line)]
-    rows = [f'[{_rel_of(p)} | 共 {len(lines)} 行 / 净汉字 {_count_hanzi(text)} / {p.stat().st_size:,} 字节]']
+    rows = [f'[{_rel_of(p)} | 共 {len(lines)} 行 / 净汉字 {hanzi_at[-1]} / {p.stat().st_size:,} 字节]']
     for idx, (start, level, title) in enumerate(heads):
         if level > max_level:
             continue
@@ -808,7 +961,7 @@ def _outline_one(p: Path, max_level: int) -> str:
             if nxt_level <= level:
                 end = nxt_start - 1
                 break
-        hanzi = _count_hanzi('\n'.join(lines[start - 1:end]))
+        hanzi = hanzi_at[end] - hanzi_at[start - 1]
         rows.append(f'{"  " * (level - 1)}{"#" * level} {title}  第 {start}–{end} 行（净汉字 {hanzi}）')
     if len(rows) == 1:
         rows.append('  （没有标题）')
@@ -893,20 +1046,16 @@ def _call_tool(name: str, args: dict) -> str:
         if not base.exists():
             return f'目录不存在: {sub}'
         out = []
-        for p in sorted(base.rglob('*')):
-            if any(part.startswith('.') or part == 'archive' for part in p.relative_to(NOVEL_ROOT).parts):
-                continue
-            if p.is_file() and p.suffix.lower() in ('.md', '.txt'):
-                rel = p.relative_to(NOVEL_ROOT).as_posix()
-                txt = p.read_text(encoding='utf-8', errors='replace')
-                out.append(f'{rel}  ({len(txt.splitlines())} 行, {p.stat().st_size:,} 字节)')
+        for p in (_text_files(base, include_archive=False) if base.is_dir() else ()):
+            entry = _file_lines(p)
+            out.append(f'{_rel_of(p)}  ({len(entry.lines)} 行, {entry.size:,} 字节)')
         return '\n'.join(out) if out else '未找到 .md / .txt 文件'
 
     if name == 'read_novel_file':
         p = _safe_path(args['path'])
         if not p.exists() or not p.is_file():
             return f'文件不存在: {args["path"]}'
-        all_lines = p.read_text(encoding='utf-8', errors='replace').splitlines()
+        all_lines = _file_lines(p).lines
         total = len(all_lines)
         tail = args.get('tail_lines')
         if tail and int(tail) > 0:
@@ -930,19 +1079,21 @@ def _call_tool(name: str, args: dict) -> str:
         pats = [re.compile(q if use_regex else re.escape(q), re.IGNORECASE) for q in queries]
         glob = (args.get('glob') or '').strip()
         files: list[Path] = []
+        seen: set[Path] = set()
         for rp in raw_paths or ['']:
             base = _safe_path(rp) if rp else NOVEL_ROOT
             if not base.exists():
                 return f'路径不存在: {rp}'
             in_archive = base != NOVEL_ROOT and _under(_rel_of(base), 'archive')
             for f in _md_files(base, include_archive=in_archive):
-                if f not in files and (not glob or fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(_rel_of(f), glob)):
+                if f not in seen and (not glob or fnmatch.fnmatch(f.name, glob) or fnmatch.fnmatch(_rel_of(f), glob)):
+                    seen.add(f)
                     files.append(f)
         totals = [0] * len(queries)
         hits = []
         for f in files:
             rel = _rel_of(f) if NOVEL_ROOT in f.parents else f.name
-            flines = f.read_bytes().decode('utf-8', errors='replace').splitlines()
+            flines = _file_lines(f).lines
             for idx, line in enumerate(flines):
                 matched = [i for i, pat in enumerate(pats) if pat.search(line)]
                 if not matched:
@@ -1127,6 +1278,14 @@ def _call_tool(name: str, args: dict) -> str:
 
 
 class MCPHandler(BaseHTTPRequestHandler):
+    # Keep-alive: the WebUI polls this server over a (possibly SOCKS5-tunnelled) link where every new
+    # connection is a round trip. Every response below carries Content-Length (or is a bodiless 204), which
+    # HTTP/1.1 needs. NODELAY because headers and body leave in two writes; without it Nagle plus delayed ACK
+    # stalls the second one on a persistent connection. `timeout` reaps idle connections and their threads.
+    protocol_version = 'HTTP/1.1'
+    disable_nagle_algorithm = True
+    timeout = 120
+
     def log_message(self, fmt, *args):
         return
 
@@ -1170,6 +1329,8 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.headers.get('Transfer-Encoding'):
+            self.close_connection = True  # chunked bodies are not parsed here; do not reuse the stream
         length = int(self.headers.get('Content-Length') or 0)
         raw = self.rfile.read(length).decode('utf-8', errors='replace') if length else '{}'
         try:

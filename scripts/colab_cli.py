@@ -1,10 +1,11 @@
 """Run the unified kernel's models through the official Colab CLI (google-colab-cli), no browser tab.
 
-  python scripts/colab_cli.py start  <slug> [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
-  python scripts/colab_cli.py launch <slug> [--gpu G4] [--idle-min 45]
-  python scripts/colab_cli.py verify <slug>
+  python scripts/colab_cli.py start     [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
+  python scripts/colab_cli.py launch    [<slug>] [--gpu G4] [--idle-min 45]
+  python scripts/colab_cli.py verify    [<slug>]
+  python scripts/colab_cli.py easycolab [gui | wake | status | stop] [--gpu G4] [--idle-min 45]
   python scripts/colab_cli.py status
-  python scripts/colab_cli.py stop   [<slug> | --all]
+  python scripts/colab_cli.py stop      [<slug> | --all]
 
 start reuses colab_kernel.build_notebook_dict, so the CLI path and the notebook path run the same
 cell-1 code; the notebook's frontend-only tail (banner, WebUI popup, stop button) is cut off.
@@ -52,14 +53,29 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from colab_kernel import MODELS, build_notebook_dict  # noqa: E402
-from secrets_config import FIELDS, load_config  # noqa: E402
+
+# `status` and `stop` are the commands run most often and need none of these: requests alone is ~170 ms of
+# import time, colab_kernel (+ secrets_config, colab_sync, sqlite3) another ~35 ms. Functions import what they
+# use; `import colab_cli; colab_cli.ALL_MODELS` and friends still resolve through __getattr__.
+_LAZY_ATTRS = {
+    'requests': 'requests', 'ALL_MODELS': 'colab_kernel', 'MODELS': 'colab_kernel',
+    'build_notebook_dict': 'colab_kernel', 'FIELDS': 'secrets_config', 'load_config': 'secrets_config',
+}
+
+
+def __getattr__(name):
+    module = _LAZY_ATTRS.get(name)
+    if module is None:
+        raise AttributeError('module %r has no attribute %r' % (__name__, name))
+    import importlib
+    mod = importlib.import_module(module)
+    return mod if name == module else getattr(mod, name)
+
 
 CONSOLE_MARKER = '就绪横幅 + WebUI 标签页 + 停机按钮'
 ENV = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
@@ -120,7 +136,33 @@ def keepalive_state(session: str) -> dict | None:
         return None
 
 
+def _win_pid_alive(pid: int) -> bool:
+    """OpenProcess + exit code: the same answer as tasklist without spawning a process (~0.1-0.3 s each)."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: it exists, we just may not look inside
+    try:
+        code = wintypes.DWORD()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            return _win_pid_alive(pid)
+        except Exception:  # no ctypes / odd Python build: fall back to the slow, always-available probe
+            pass
     out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % pid, '/NH'], capture_output=True, text=True, errors='replace').stdout
     return str(pid) in out
 
@@ -258,7 +300,9 @@ def stop_keepalive(session: str):
 
 
 def _config():
-    for spec in MODELS.values():
+    from colab_kernel import ALL_MODELS
+    from secrets_config import FIELDS, load_config
+    for spec in ALL_MODELS.values():
         FIELDS.setdefault(spec['drive_key'], (spec['env_key'], spec['placeholder']))
     config, _, _, sources = load_config([])
     needed = ('api_key', 'ts_client_id', 'ts_client_secret', 'tailnet_fqdn')
@@ -269,7 +313,8 @@ def _config():
 
 
 def _cells(slug: str, config: dict) -> dict:
-    nb = build_notebook_dict(MODELS[slug], config, with_switch=False)
+    from colab_kernel import ALL_MODELS, build_notebook_dict
+    nb = build_notebook_dict(ALL_MODELS[slug], config, with_switch=False)
     return {c['metadata']['id']: ''.join(c['source']) for c in nb['cells'] if c['cell_type'] == 'code'}
 
 
@@ -297,7 +342,8 @@ def headless_setup(slug: str, config: dict, idle_min: int) -> str:
 
 def notebook_first_cell(slug: str) -> str:
     """First code cell of notebooks/<model>.ipynb, frontend tail removed. Does not rebuild the kernel."""
-    path = NOTEBOOKS / MODELS[slug]['notebook']
+    from colab_kernel import ALL_MODELS
+    path = NOTEBOOKS / ALL_MODELS[slug]['notebook']
     if not path.exists():
         raise SystemExit('notebook not found: %s' % path)
     nb = json.loads(path.read_text(encoding='utf-8'))
@@ -319,9 +365,36 @@ def launch_exec_code(cell: str) -> str:
     return prefix + cell
 
 
+def _reuse_active_session_as(slug: str, gpu: str, active: list[str]) -> bool:
+    """If another active session (e.g. 'easycolab') is already running on the same GPU, alias it to slug in sessions.json."""
+    sess_file = CLI_DIR / 'sessions.json'
+    if not sess_file.exists():
+        return False
+    try:
+        items = json.loads(sess_file.read_text(encoding='utf-8'))
+        if not isinstance(items, list):
+            return False
+        named = [s for s in active if s != '?']
+        donor = next((it for it in items if isinstance(it, dict) and it.get('name') in named
+                      and str(it.get('accelerator') or '').upper() == gpu.upper()), None)
+        if not donor:
+            return False
+        alias_item = dict(donor)
+        alias_item['name'] = slug
+        items = [it for it in items if not (isinstance(it, dict) and it.get('name') == slug)] + [alias_item]
+        sess_file.write_text(json.dumps(items, indent=2) + '\n', encoding='utf-8', newline='')
+        print('[colab_cli] reusing active %s session [%s] as [%s]' % (gpu, donor.get('name'), slug), flush=True)
+        return True
+    except Exception:
+        return False
+
+
 def _ensure_session(slug: str, gpu: str):
-    if slug in sessions():
+    active = sessions()
+    if slug in active:
         print('[colab_cli] reusing session %s' % slug, flush=True)
+        return
+    if active and _reuse_active_session_as(slug, gpu, active):
         return
     shape = [] if gpu in ('G4', 'L4') else ['--high-mem']
     print('[colab_cli] colab new -s %s --gpu %s %s' % (slug, gpu, ' '.join(shape)), flush=True)
@@ -330,12 +403,14 @@ def _ensure_session(slug: str, gpu: str):
 
 def cmd_launch(slug: str, gpu: str, idle_min: int):
     """new --gpu, start the TFE daemon, exec the notebook's first cell in the kernel, poll /health."""
+    import requests
+    from colab_kernel import ALL_MODELS
     config = _config()
     cell_exec_code = launch_exec_code(notebook_first_cell(slug))
     if '<YOUR_' in cell_exec_code:
         raise SystemExit(
             'notebook %s contains sanitized <YOUR_...> placeholders; '
-            'generate a private build first with: python scripts/colab_kernel.py %s' % (MODELS[slug]['notebook'], slug))
+            'generate a private build first with: python scripts/colab_kernel.py %s' % (ALL_MODELS[slug]['notebook'], slug))
     # svc:qwen publishes raw TCP :443 to llama-server. HTTPS on that name never returns 200.
     health = 'http://%s:443/health' % config['tailnet_fqdn']
     before = usage()
@@ -394,6 +469,8 @@ def cmd_launch(slug: str, gpu: str, idle_min: int):
 
 
 def remote_check(config: dict, slug: str) -> bool:
+    import requests
+    from colab_kernel import ALL_MODELS
     base = 'http://%s:443' % config['tailnet_fqdn']
     hdr = {'Authorization': 'Bearer ' + config['api_key']}
     last = None
@@ -401,7 +478,7 @@ def remote_check(config: dict, slug: str) -> bool:
         try:
             ids = [m['id'] for m in requests.get(base + '/v1/models', headers=hdr, timeout=10).json()['data']]
             print('[colab_cli] Tailscale %s/v1/models -> %s' % (base, ids), flush=True)
-            return MODELS[slug]['alias'] in ids
+            return ALL_MODELS[slug]['alias'] in ids
         except Exception as err:
             last = err
             time.sleep(5)
@@ -414,11 +491,7 @@ def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bo
     code = headless_setup(slug, config, idle_min)
     before = usage()
     print('[colab_cli] balance %.2f CU, %d active' % (before['balance'] or 0, before['active']), flush=True)
-    if slug not in sessions():
-        # G4 has a single 176 GiB shape and the backend rejects --high-mem for it; other GPUs need it for big models.
-        shape = [] if gpu in ('G4', 'L4') else ['--high-mem']
-        print('[colab_cli] colab new -s %s --gpu %s %s' % (slug, gpu, ' '.join(shape)), flush=True)
-        print(colab('new', '-s', slug, '--gpu', gpu, *shape, timeout=900).strip(), flush=True)
+    _ensure_session(slug, gpu)
     try:
         start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
     except SystemExit as err:
@@ -461,15 +534,44 @@ def cmd_status():
                   '(restart with: start %s, or stop it)' % (s, s))
 
 
+def _in_background(fn):
+    """Start fn on a thread now; the returned callable joins it and returns the result or re-raises its error."""
+    box = {}
+
+    def run():
+        try:
+            box['value'] = fn()
+        except BaseException as err:
+            box['error'] = err
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+
+    def wait():
+        worker.join()
+        if 'error' in box:
+            raise box['error']
+        return box.get('value')
+
+    return wait
+
+
 def cmd_stop(names: list[str]):
     stop_all = not names or names == ['--all']
-    scheduled = keepalive_sessions_in_schtasks_query(_schtasks_query_text()) if stop_all else []
-    state_sessions = keepalive_state_sessions() if stop_all else []
-    targets = stop_targets(names, sessions() if stop_all else [], scheduled, state_sessions)
-    for s in targets:
-        if s != '?':
-            stop_keepalive(s)
-            print(colab('stop', '-s', s, check=False).strip())
+    live, scheduled, state_sessions = [], [], []
+    if stop_all:
+        # `schtasks /Query` (slow) and `colab sessions` do not depend on each other. Only a non-colab command
+        # overlaps: two colab processes at once could race on token.json, which the CLI rewrites in place.
+        scheduled_text = _in_background(_schtasks_query_text)
+        live = sessions()
+        scheduled = keepalive_sessions_in_schtasks_query(scheduled_text())
+        state_sessions = keepalive_state_sessions()
+    named = [s for s in stop_targets(names, live, scheduled, state_sessions) if s != '?']
+    # Every daemon goes first (taskkill + schtasks /Delete each, in parallel), then the sessions are stopped.
+    for wait in [_in_background(lambda s=s: stop_keepalive(s)) for s in named]:
+        wait()
+    for s in named:
+        print(colab('stop', '-s', s, check=False).strip())
     for _ in range(5):
         u = usage()
         if u['active'] == 0 and not u['rate']:
@@ -484,6 +586,40 @@ def cmd_stop(names: list[str]):
     return 0 if u['active'] == 0 else 1
 
 
+_PROGRAMS = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'Programs'
+EASYCOLAB_DIR = _PROGRAMS / 'Colab-yoga' if (_PROGRAMS / 'Colab-yoga/Colab-yoga.exe').exists() else _PROGRAMS / 'EasyColab'
+EASYCOLAB_EXE = (EASYCOLAB_DIR / 'Colab-yoga.exe') if (EASYCOLAB_DIR / 'Colab-yoga.exe').exists() else (EASYCOLAB_DIR / 'EasyColab.exe')
+EASYCOLAB_PY = (EASYCOLAB_DIR / 'runtime/python.exe') if (EASYCOLAB_DIR / 'runtime/python.exe').exists() else (EASYCOLAB_DIR / '_internal/runtime/python.exe')
+EASYCOLAB_BRIDGE = (EASYCOLAB_DIR / 'bridge/colab_yoga_bridge.py') if (EASYCOLAB_DIR / 'bridge/colab_yoga_bridge.py').exists() else (EASYCOLAB_DIR / '_internal/colab_bridge.py')
+
+
+def cmd_easycolab(rest: list[str]) -> int:
+    if not EASYCOLAB_EXE.exists():
+        raise SystemExit('EasyColab not found at %s' % EASYCOLAB_EXE)
+    opt = lambda flag, default: rest[rest.index(flag) + 1] if flag in rest else default  # noqa: E731
+    pos = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] not in ('--gpu', '--idle-min'))]
+    sub = pos[0] if pos else 'gui'
+    if sub == 'gui':
+        subprocess.Popen([str(EASYCOLAB_EXE)], cwd=str(EASYCOLAB_DIR))
+        print('[colab_cli] EasyColab GUI launched (%s)' % EASYCOLAB_EXE, flush=True)
+        return 0
+    if sub == 'status':
+        return subprocess.run([str(EASYCOLAB_PY), '-u', str(EASYCOLAB_BRIDGE), 'auth_status'], env=ENV).returncode
+    if sub == 'stop':
+        return cmd_stop(['--all'])
+    if sub == 'wake':
+        gpu = opt('--gpu', 'G4')
+        idle_min = int(opt('--idle-min', 45))
+        rc = subprocess.run([str(EASYCOLAB_PY), '-u', str(EASYCOLAB_BRIDGE), 'wake', '--gpu', gpu], env=ENV).returncode
+        if rc == 0:
+            active = [s for s in sessions() if s != '?']
+            target = 'easycolab' if 'easycolab' in active else (active[0] if active else None)
+            if target:
+                start_keepalive(target, idle_min)
+        return rc
+    raise SystemExit('unknown easycolab action %s (expected: gui | wake | status | stop)' % sub)
+
+
 def main(argv: list[str]):
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__)
@@ -491,14 +627,18 @@ def main(argv: list[str]):
     cmd, rest = argv[0], argv[1:]
     opt = lambda flag, default: rest[rest.index(flag) + 1] if flag in rest else default  # noqa: E731
     pos = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] not in ('--gpu', '--idle-min'))]
+    if cmd in ('easycolab', 'colab-yoga'):
+        return cmd_easycolab(rest)
     if cmd in ('start', 'verify', 'launch'):
-        if not pos or pos[0] not in MODELS:
-            raise SystemExit('slug required, one of: ' + ', '.join(MODELS))
+        from colab_kernel import ALL_MODELS, MODELS
+        slug = pos[0] if pos else next(iter(MODELS))
+        if slug not in ALL_MODELS:
+            raise SystemExit('slug required, one of: %s (archived: %s)' % (', '.join(MODELS), ', '.join(ALL_MODELS)))
         if cmd == 'verify':
-            return cmd_verify(pos[0])
+            return cmd_verify(slug)
         if cmd == 'launch':
-            return cmd_launch(pos[0], opt('--gpu', 'G4'), int(opt('--idle-min', 45)))
-        return cmd_start(pos[0], opt('--gpu', 'G4'), int(opt('--idle-min', 45)),
+            return cmd_launch(slug, opt('--gpu', 'G4'), int(opt('--idle-min', 45)))
+        return cmd_start(slug, opt('--gpu', 'G4'), int(opt('--idle-min', 45)),
                          '--no-verify' not in rest, '--keep-on-fail' in rest)
     if cmd == 'status':
         return cmd_status()
