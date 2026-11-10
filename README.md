@@ -2,9 +2,9 @@
 
 中文 | [English](README.en.md)
 
-> **使用情景与用途**：想在租用的 Google Colab 96 GB 付费 GPU（G4 · RTX PRO 6000 Blackwell）上低成本、可重复地部署百 GB 级开源 GGUF 大模型时使用——提供 DDR5 内存盘 32 路极速冷启动、无头 CLI 30 秒心跳保活、闲置自动释放、Tailscale 私网固定入口与零 OAuth 双轨 CU 查账。
+在 Google Colab 租用的 G4 GPU（RTX PRO 6000 Blackwell，96 GB 显存）上跑百 GB 级 GGUF 大模型：冷启动快，无头保活，闲置自动释放，经 Tailscale 私网固定地址访问。
 
-在租用的 **Colab G4（RTX PRO 6000 Blackwell，96 GB 显存）** 上把百 GB 级 GGUF 模型跑成可复现、私有且算力可控的服务。单一统一内核（`scripts/colab_kernel.py`）同时驱动**两条并存轨道**：
+整套服务可复现、私有、花费可控。单一统一内核（`scripts/colab_kernel.py`）同时驱动**两条并存轨道**：
 
 - **主力轨道（无头 Colab CLI + 30 秒内核心跳）** — `colab_cli.py` + `colab_keepalive.py` 无需打开浏览器标签页即可分配 G4 并运行内核启动代码，通过每 30 秒一次的 `colab exec` 内核心跳（移植自 Wakeloom 本地模式）跨过 Colab CLI 的 21–35 分钟闲置回收窗口，并在连续闲置 45 分钟后自动释放实例。
 - **后备轨道（浏览器 Notebook 同步 + 零 OAuth `/tun/m` 算力计费与强杀开关）** — `make_*_notebook.py --sync-colab --run-cell1`、`colab_sync.py` 与 `colab_meter.py` 在已登录的 Edge 标签页内（`BrowserMCP → Playwriter → playwright-cli`）驱动同一份 Notebook，提供交互式 WebUI / LoRA / 模型热切换控制台、运行归档的多模型 Notebook、核对双轨 CU 账单，并在 `colab_cli.py stop --all` 移交时强制清理无名 `[?]` 幽灵会话。
@@ -26,25 +26,33 @@ Colab 运行时是一次性的，每次新会话都会清空 `/content`，因此
 
 ## 架构全景
 
-```text
- 本地机器                                              Colab 运行时 (G4 96 GB 显存, ~176 GB 内存)
- ┌─────────────────────────────────────────────┐       ┌───────────────────────────────────────────┐
- │ 主力轨道: 无头 CLI                          │       │ 统一内核 (colab_kernel.py cell 1)         │
- │  colab_cli.py start / launch / status / stop│       │  1. GPU 检查 (>= 85 GB 显存)              │
- │   ├─ 官方 google-colab-cli (colab exec)     ├──────▶│  2. /dev/shm + /var/colab tmpfs 内存盘    │
- │   └─ colab_keepalive.py                     │       │  3. 8 进程 x 4 线程 -> os.pwrite 并发直写 │
- │       30s 内核心跳 + 60s TFE ping           │       │  4. llama-server (MTP, MAP_POPULATE)      │
- │       + 45m /slots 闲置自动关停             │       │  5. 加载后回收 tmpfs -> 扩大 cache-ram    │
- │                    │                        │       │  6. tailscaled + Serve -> svc:qwen        │
- │                    ▼ (若残留无名 [?] 会话)  │       │  7. (仅浏览器模式) 状态横幅 + 模型热切换  │
- │ 后备轨道: 已登录 Edge (__ANY__ 标签页)      │       └─────────────────────┬─────────────────────┘
- │  make_*_notebook.py --sync-colab --run-cell1│                             │
- │  colab_sync.py (BrowserMCP→Playwriter→PW)   ├─────────────────────────────┤
- │  colab_meter.py (双轨账单, unassign 强杀)   │◀──── /tun/m/* ──────────────┘
- └────────────────────┬────────────────────────┘
-                      │
-                      └────── http://qwen.<YOUR_TAILNET>.ts.net:443/
-                              (仅限 Tailnet 私网访问: WebUI + OpenAI 兼容 /v1 + local_novel_mcp 文件桥)
+```mermaid
+flowchart LR
+    subgraph LOCAL["本地机器"]
+        direction TB
+        subgraph PRI["主力轨道：无头 CLI"]
+            CLI["colab_cli.py<br/>start · launch · status · stop"]
+            KA["colab_keepalive.py<br/>30s 内核心跳 · 60s TFE ping<br/>45 分钟 /slots 闲置自动关停"]
+            CLI --> KA
+        end
+        subgraph FB["后备轨道：已登录 Edge（__ANY__ 标签页）"]
+            NB["make_*_notebook.py<br/>--sync-colab --run-cell1"]
+            SY["colab_sync.py<br/>BrowserMCP → Playwriter → PW"]
+            ME["colab_meter.py<br/>双轨账单 · unassign 强杀"]
+        end
+        CLI -. "残留无名 [?] 会话时回退" .-> SY
+    end
+
+    subgraph VM["Colab 运行时 · G4"]
+        K["统一内核 cell 1<br/>colab_kernel.py<br/>① GPU 检查 ≥ 85 GB<br/>② tmpfs 内存盘<br/>③ 32 路并发直写<br/>④ llama-server · MTP<br/>⑤ 回收 tmpfs → cache-ram<br/>⑥ Serve → svc:qwen<br/>⑦ 横幅 · 热切换（仅浏览器）"]
+    end
+
+    CLI -- "colab exec" --> K
+    KA -- "心跳" --> K
+    NB --> K
+    SY --> K
+    ME <-- "/tun/m/*" --> K
+    K --> TS["qwen.&lt;YOUR_TAILNET&gt;.ts.net<br/>仅 Tailnet 私网可见<br/>WebUI · /v1 · 本地文件桥"]
 ```
 
 ## 极速冷启动
@@ -169,34 +177,33 @@ python scripts/make_g4_fn_notebook.py --sanitized --output-dir dist/
 
 ## 仓库目录结构
 
-```text
-SKILL.md                        面向 Agent 的操作手册（CLI 主力轨道 + 浏览器后备轨道双轨并存）
-scripts/
-  colab_kernel.py               统一的 3.8fn G4 内核与分发器（qwen38-fn IQ4_XS-plus、qwen38-fn-nl IQ4_NL）
-  colab_cli.py                  主力轨道：无头 Colab CLI 启动、状态查询与停止（自动回退至 colab_sync）
-  colab_keepalive.py            主力轨道：后台分离的 30s 内核心跳 + 60s TFE ping + 45m /slots 闲置守卫
-  make_g4_fn_notebook.py        G4 IQ4_XS-plus Notebook 生成入口
-  make_g4_fn_nl_notebook.py     G4 IQ4_NL（更高精度，约 87 GB 显存）Notebook 生成入口
-  make_strata_fn_notebook.py    实验性 Strata 引擎（Unsloth UD-IQ4_XS-v31 + DFlash2）Notebook 生成器
-  boot_strata_trial.py          实验性 Strata Notebook 的分离式 CLI 启动辅助脚本
-  colab_sync.py                 后备轨道：Colab 网页推送与单元格执行（BrowserMCP→Playwriter→PW）及 /tun/m 释放
-  colab_meter.py                后备轨道：零 OAuth status / start / stop CLI 与双轨 CU 账单
-  colab_pw.mjs                  Playwriter 后备后端（支持 __ANY__ 标签页复用模式）
-  local_novel_mcp.py            桥接进 Colab WebUI 的本地 Windows 小说目录 MCP 服务
-  secrets_config.py             .secrets.json / 环境变量 / 占位符加载器
-  parallel_download.py          多进程并发下载器参考实现
-  webui_console.py              首单元格控制台与停止按钮
-  stop-runtime.py               运行时释放辅助脚本
-  update-pi-provider.ps1        将服务端点注册进本地 pi provider 列表
-  test_colab_keepalive.py       30s 内核心跳、TFE ping 与计划任务清理单元测试
-  test_colab_kernel.py          生产级极速启动内核与启动指纹单元测试
-  test_local_novel_mcp.py       本地小说 MCP 工具与防覆盖保护单元测试
-references/                     模型说明、CU 预算核算、Tailscale 与远程接入指南
-archive/multi-model-kernel/     已归档冻结的多模型内核、生成器与说明（122B、Nemotron、Gemma）
-debug-runs/                     2026-11-07 T4 对照/心跳 A/B 实验与 G4 长稳测试日志
-notebooks/                      脱敏后的生成版 Notebook
-.secrets.example.json           配置模板
-```
+| 路径 | 作用 |
+|---|---|
+| `SKILL.md` | 面向 Agent 的操作手册（CLI 主力轨道 + 浏览器后备轨道双轨并存） |
+| `scripts/colab_kernel.py` | 统一的 3.8fn G4 内核与分发器（qwen38-fn IQ4_XS-plus、qwen38-fn-nl IQ4_NL） |
+| `scripts/colab_cli.py` | 主力轨道：无头 Colab CLI 启动、状态查询与停止（自动回退至 colab_sync） |
+| `scripts/colab_keepalive.py` | 主力轨道：后台分离的 30s 内核心跳 + 60s TFE ping + 45m /slots 闲置守卫 |
+| `scripts/make_g4_fn_notebook.py` | G4 IQ4_XS-plus Notebook 生成入口 |
+| `scripts/make_g4_fn_nl_notebook.py` | G4 IQ4_NL（更高精度，约 87 GB 显存）Notebook 生成入口 |
+| `scripts/make_strata_fn_notebook.py` | 实验性 Strata 引擎（Unsloth UD-IQ4_XS-v31 + DFlash2）Notebook 生成器 |
+| `scripts/boot_strata_trial.py` | 实验性 Strata Notebook 的分离式 CLI 启动辅助脚本 |
+| `scripts/colab_sync.py` | 后备轨道：Colab 网页推送与单元格执行（BrowserMCP→Playwriter→PW）及 /tun/m 释放 |
+| `scripts/colab_meter.py` | 后备轨道：零 OAuth status / start / stop CLI 与双轨 CU 账单 |
+| `scripts/colab_pw.mjs` | Playwriter 后备后端（支持 __ANY__ 标签页复用模式） |
+| `scripts/local_novel_mcp.py` | 桥接进 Colab WebUI 的本地 Windows 小说目录 MCP 服务 |
+| `scripts/secrets_config.py` | .secrets.json / 环境变量 / 占位符加载器 |
+| `scripts/parallel_download.py` | 多进程并发下载器参考实现 |
+| `scripts/webui_console.py` | 首单元格控制台与停止按钮 |
+| `scripts/stop-runtime.py` | 运行时释放辅助脚本 |
+| `scripts/update-pi-provider.ps1` | 将服务端点注册进本地 pi provider 列表 |
+| `scripts/test_colab_keepalive.py` | 30s 内核心跳、TFE ping 与计划任务清理单元测试 |
+| `scripts/test_colab_kernel.py` | 生产级极速启动内核与启动指纹单元测试 |
+| `scripts/test_local_novel_mcp.py` | 本地小说 MCP 工具与防覆盖保护单元测试 |
+| `references/` | 模型说明、CU 预算核算、Tailscale 与远程接入指南 |
+| `archive/multi-model-kernel/` | 已归档冻结的多模型内核、生成器与说明（122B、Nemotron、Gemma） |
+| `debug-runs/` | 2026-11-07 T4 对照/心跳 A/B 实验与 G4 长稳测试日志 |
+| `notebooks/` | 脱敏后的生成版 Notebook |
+| `.secrets.example.json` | 配置模板 |
 
 ## 安全说明
 

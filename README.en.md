@@ -2,9 +2,9 @@
 
 [简体中文](README.md) | English
 
-> **When & Why to Use**: For running 100 GB-class open-weights GGUF models on a rented Google Colab 96 GB GPU (G4 · RTX PRO 6000 Blackwell) as a repeatable, budget-aware private service—featuring DDR5 RAM-disk 32-stream cold start, headless CLI with 30 s heartbeat keepalive, idle auto-stop, fixed Tailscale endpoint, and zero-OAuth two-track CU billing.
+Run 100 GB-class GGUF models on a rented Google Colab G4 GPU (RTX PRO 6000 Blackwell, 96 GB VRAM): fast cold starts, headless keepalive, automatic release when idle, and a fixed private address over Tailscale.
 
-Run a 100 GB-class GGUF model on a rented **Colab G4 (RTX PRO 6000 Blackwell, 96 GB)** as a repeatable, private, budget-aware service. A single unified kernel (`scripts/colab_kernel.py`) powers **two coexisting tracks**:
+The service is repeatable, private, and budget-aware. A single unified kernel (`scripts/colab_kernel.py`) powers **two coexisting tracks**:
 
 - **Primary track (Headless Colab CLI + 30 s kernel heartbeat)** — `colab_cli.py` + `colab_keepalive.py` allocate a G4, run the kernel's startup code without opening a browser tab, keep the VM alive past Colab's 21–35 min CLI prune window via a 30 s `colab exec` heartbeat (ported from Wakeloom's local mode), and auto-stop after 45 idle minutes.
 - **Fallback track (Browser notebook sync + zero-OAuth `/tun/m` meter & kill switch)** — `make_*_notebook.py --sync-colab --run-cell1`, `colab_sync.py` and `colab_meter.py` drive the same notebook inside a signed-in Edge tab (`BrowserMCP → Playwriter → playwright-cli`), provide an interactive WebUI/LoRA/hot-switch console, run archived multi-model notebooks, reconcile two-track CU bills, and force-kill unnamed `[?]` ghost sessions when `colab_cli.py stop --all` hands off to it.
@@ -26,25 +26,33 @@ The runtime is disposable and `/content` is wiped on every new session, so every
 
 ## Architecture
 
-```text
- Local machine                                         Colab runtime (G4 96 GB, ~176 GB RAM)
- ┌─────────────────────────────────────────────┐       ┌───────────────────────────────────────────┐
- │ PRIMARY: Headless CLI                       │       │ Unified kernel (colab_kernel.py cell 1)   │
- │  colab_cli.py start / launch / status / stop│       │  1. GPU check (>= 85 GB VRAM)             │
- │   ├─ official google-colab-cli (colab exec) ├──────▶│  2. /dev/shm + /var/colab tmpfs RAM disks │
- │   └─ colab_keepalive.py                     │       │  3. 8 procs x 4 threads -> os.pwrite      │
- │       30s kernel beat + 60s TFE ping        │       │  4. llama-server (MTP, MAP_POPULATE)      │
- │       + 45m /slots idle auto-stop           │       │  5. post-load tmpfs reclaim -> cache-ram  │
- │                    │                        │       │  6. tailscaled + Serve -> svc:qwen        │
- │                    ▼ (if unnamed [?] left)  │       │  7. (browser only) banner + hot-switch    │
- │ FALLBACK: Signed-in Edge (__ANY__ tab)      │       └─────────────────────┬─────────────────────┘
- │  make_*_notebook.py --sync-colab --run-cell1│                             │
- │  colab_sync.py (BrowserMCP→Playwriter→PW)   ├─────────────────────────────┤
- │  colab_meter.py (two-track bill, unassign)  │◀──── /tun/m/* ──────────────┘
- └────────────────────┬────────────────────────┘
-                      │
-                      └────── http://qwen.<YOUR_TAILNET>.ts.net:443/
-                              (tailnet only, WebUI + OpenAI-compatible /v1 + local_novel_mcp bridge)
+```mermaid
+flowchart LR
+    subgraph LOCAL["Local machine"]
+        direction TB
+        subgraph PRI["Primary: headless CLI"]
+            CLI["colab_cli.py<br/>start · launch · status · stop"]
+            KA["colab_keepalive.py<br/>30s kernel beat · 60s TFE ping<br/>45 min /slots idle auto-stop"]
+            CLI --> KA
+        end
+        subgraph FB["Fallback: signed-in Edge (__ANY__ tab)"]
+            NB["make_*_notebook.py<br/>--sync-colab --run-cell1"]
+            SY["colab_sync.py<br/>BrowserMCP → Playwriter → PW"]
+            ME["colab_meter.py<br/>two-track bill · unassign kill"]
+        end
+        CLI -. "hands off if unnamed [?] sessions remain" .-> SY
+    end
+
+    subgraph VM["Colab runtime · G4"]
+        K["Unified kernel cell 1<br/>colab_kernel.py<br/>① GPU check ≥ 85 GB<br/>② tmpfs RAM disks<br/>③ 32-stream writes<br/>④ llama-server · MTP<br/>⑤ tmpfs → cache-ram<br/>⑥ Serve → svc:qwen<br/>⑦ banner · hot-switch (browser)"]
+    end
+
+    CLI -- "colab exec" --> K
+    KA -- "heartbeat" --> K
+    NB --> K
+    SY --> K
+    ME <-- "/tun/m/*" --> K
+    K --> TS["qwen.&lt;YOUR_TAILNET&gt;.ts.net<br/>tailnet only<br/>WebUI · /v1 · local file bridge"]
 ```
 
 ## Fast cold start
@@ -169,34 +177,33 @@ python scripts/make_g4_fn_notebook.py --sanitized --output-dir dist/
 
 ## Repository layout
 
-```text
-SKILL.md                        agent-facing runbook (coexisting CLI primary + browser fallback)
-scripts/
-  colab_kernel.py               unified 3.8fn G4 kernel & distributor (qwen38-fn IQ4_XS-plus, qwen38-fn-nl IQ4_NL)
-  colab_cli.py                  PRIMARY: headless Colab CLI launcher, status & stop (falls back to colab_sync)
-  colab_keepalive.py            PRIMARY: detached 30s kernel heartbeat + 60s TFE ping + 45m /slots idle guard
-  make_g4_fn_notebook.py        G4 IQ4_XS-plus notebook generator entry
-  make_g4_fn_nl_notebook.py     G4 IQ4_NL (higher precision, ~87 GB VRAM) notebook generator entry
-  make_strata_fn_notebook.py    experimental Strata engine (Unsloth UD-IQ4_XS-v31 + DFlash2) notebook generator
-  boot_strata_trial.py          experimental detached CLI boot helper for the Strata notebook
-  colab_sync.py                 FALLBACK: push/run cells in Colab Web (BrowserMCP→Playwriter→PW), /tun/m release
-  colab_meter.py                FALLBACK: zero-OAuth status / start / stop CLI with two-track CU bill
-  colab_pw.mjs                  Playwriter fallback backend (supports the __ANY__ tab mode)
-  local_novel_mcp.py            local Windows novel directory MCP server bridged into the Colab WebUI
-  secrets_config.py             .secrets.json / env / placeholder loader
-  parallel_download.py          multi-process downloader reference
-  webui_console.py              first-cell console and stop button
-  stop-runtime.py               release helper
-  update-pi-provider.ps1        register the endpoint in a local pi provider list
-  test_colab_keepalive.py       unit tests for 30s kernel heartbeat, TFE ping & schtasks cleanup
-  test_colab_kernel.py          unit tests for production fast-boot kernel & boot fingerprint
-  test_local_novel_mcp.py       unit tests for local novel MCP tools & anti-overwrite guards
-references/                     model notes, CU budget, Tailscale and remote-access guides
-archive/multi-model-kernel/     frozen multi-model kernel, generators and notes (122B, Nemotron, Gemma)
-debug-runs/                     2026-11-07 T4 control/heartbeat A/B and G4 soak logs
-notebooks/                      sanitized generated notebooks
-.secrets.example.json           config template
-```
+| Path | Purpose |
+|---|---|
+| `SKILL.md` | agent-facing runbook (coexisting CLI primary + browser fallback) |
+| `scripts/colab_kernel.py` | unified 3.8fn G4 kernel & distributor (qwen38-fn IQ4_XS-plus, qwen38-fn-nl IQ4_NL) |
+| `scripts/colab_cli.py` | PRIMARY: headless Colab CLI launcher, status & stop (falls back to colab_sync) |
+| `scripts/colab_keepalive.py` | PRIMARY: detached 30s kernel heartbeat + 60s TFE ping + 45m /slots idle guard |
+| `scripts/make_g4_fn_notebook.py` | G4 IQ4_XS-plus notebook generator entry |
+| `scripts/make_g4_fn_nl_notebook.py` | G4 IQ4_NL (higher precision, ~87 GB VRAM) notebook generator entry |
+| `scripts/make_strata_fn_notebook.py` | experimental Strata engine (Unsloth UD-IQ4_XS-v31 + DFlash2) notebook generator |
+| `scripts/boot_strata_trial.py` | experimental detached CLI boot helper for the Strata notebook |
+| `scripts/colab_sync.py` | FALLBACK: push/run cells in Colab Web (BrowserMCP→Playwriter→PW), /tun/m release |
+| `scripts/colab_meter.py` | FALLBACK: zero-OAuth status / start / stop CLI with two-track CU bill |
+| `scripts/colab_pw.mjs` | Playwriter fallback backend (supports the __ANY__ tab mode) |
+| `scripts/local_novel_mcp.py` | local Windows novel directory MCP server bridged into the Colab WebUI |
+| `scripts/secrets_config.py` | .secrets.json / env / placeholder loader |
+| `scripts/parallel_download.py` | multi-process downloader reference |
+| `scripts/webui_console.py` | first-cell console and stop button |
+| `scripts/stop-runtime.py` | release helper |
+| `scripts/update-pi-provider.ps1` | register the endpoint in a local pi provider list |
+| `scripts/test_colab_keepalive.py` | unit tests for 30s kernel heartbeat, TFE ping & schtasks cleanup |
+| `scripts/test_colab_kernel.py` | unit tests for production fast-boot kernel & boot fingerprint |
+| `scripts/test_local_novel_mcp.py` | unit tests for local novel MCP tools & anti-overwrite guards |
+| `references/` | model notes, CU budget, Tailscale and remote-access guides |
+| `archive/multi-model-kernel/` | frozen multi-model kernel, generators and notes (122B, Nemotron, Gemma) |
+| `debug-runs/` | 2026-11-07 T4 control/heartbeat A/B and G4 soak logs |
+| `notebooks/` | sanitized generated notebooks |
+| `.secrets.example.json` | config template |
 
 ## Security notes
 
