@@ -92,6 +92,7 @@ python scripts/colab_cli.py stop --all      # 核验末行 Active assignments: 0
 | `DRIVEFS_DB` | 指定 Drive 客户端元数据库路径（自动解析 Drive 文件 ID 用） |
 | `NOVEL_ROOT` | `local_novel_mcp.py` 向 WebUI 暴露的本机目录 |
 | `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌 |
+| `COLAB_KEEPALIVE_BEAT` | 设为 `exec` 时心跳改回每拍起一次 `colab exec`（默认在守护进程内执行，失败自动回退） |
 
 ---
 
@@ -134,7 +135,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
 | **Colab-yoga 协同工作台**（可选） | 多模态共驻 | 本地托盘 App 与 Track A 双向复用同一台 G4（共用 `~/.config/colab-cli/` 的令牌与会话） |
 | **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | 备用与兜底 | ① 网页首格按钮与第 4 格免释放热切换模型；② CLI OAuth 异常时复用已登录 Edge；③ 强杀 CLI 无法按名停止的 `[?]` 幽灵会话 |
 
-- **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli` 0.7.5 创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一行 `colab exec` 心跳，每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
+- **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli` 0.7.5 创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一行内核心跳（守护进程按 `colab exec` 的方式自己连内核执行，免去每拍起 CLI 进程；失败自动退回 `colab exec`），每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
 - **Colab-yoga**（[github.com/incredible404-rgb/Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)）：安装到 `%LOCALAPPDATA%\Programs\Colab-yoga`（含 `Colab-yoga.exe`、`runtime\python.exe`、`bridge\colab_yoga_bridge.py`）。找不到时 `colab_cli.py yoga ...` 会报出安装位置与下载地址。`colab_kernel.py` 生成时把各现役模型的无头首格导出为 `Colab-yoga\colab_kernel_runners.json`（目录不存在则跳过并提示）。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都经 `~/.config/colab-cli/sessions.json` 复用同一台 G4，不重复开卡；Colab-yoga 只清理 `18080..18999` 端口进程，不会误杀 `:8081` 的 `llama-server`。
 
 ---

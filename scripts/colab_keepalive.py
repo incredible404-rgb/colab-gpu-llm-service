@@ -9,7 +9,11 @@ task if the parent job forbids breakaway):
 Why: google-colab-cli 0.7.5 starts no keep-alive daemon (`colab new` only
 assigns), and a CLI runtime (T4 and G4 alike) is pruned 21-35 minutes after
 creation. What keeps it: a short kernel execution every 30 s (`colab exec`,
-the pattern Wakeloom's local mode uses). The TFE ping and llama-server
+the pattern Wakeloom's local mode uses). The daemon runs that execution itself
+(InProcessBeat) the way `colab exec` does - a fresh kernel websocket through
+the runtime proxy, one execute_request, the socket closed with the kernel kept -
+so Colab sees the same traffic without a CLI process (about 1 s of imports)
+starting every 30 s; any in-process failure falls back to `colab exec`. The TFE ping and llama-server
 traffic alone do not; neither does one long-running cell. A 2026-11-07 T4
 A/B: control pruned at 21 min, the 30 s exec arm lived the full soak. The old
 RuntimeService KeepAliveAssignment RPC now answers 403 USER_PROJECT_DENIED.
@@ -39,6 +43,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -234,6 +239,103 @@ def kernel_beat(session: str, path: str) -> tuple:
     return False, 'rc%d %s' % (r.returncode, tail.decode('utf-8', 'replace').strip()[-160:])
 
 
+class InProcessBeat:
+    """The kernel beat run from this process, exactly as `colab exec` runs one.
+
+    Each beat loads the session through the CLI's State (which refreshes the runtime
+    proxy token near expiry, as `colab exec` does), opens a new ColabRuntime on the
+    stored kernel, executes BEAT_CODE and closes the socket without shutting the
+    kernel down. A socket per beat, rather than one kept open, is deliberate: one
+    long-lived execution did not keep a runtime (2026-11-07 A/B), so the beat keeps
+    the CLI's connect-execute-close shape and drops only the process start.
+
+    A beat runs on a worker thread under the hard limit the subprocess had; a hung one
+    is abandoned and counts as a failure. A failed beat is retried at once with
+    `colab exec`, and after FALLBACK_AFTER failures in a row beats stay on `colab exec`
+    for FALLBACK_BEATS beats before in-process is tried again.
+    COLAB_KEEPALIVE_BEAT=exec turns the in-process beat off.
+    """
+
+    FALLBACK_AFTER = 3
+    FALLBACK_BEATS = 20
+
+    def __init__(self, state, session: str, runtime_cls=None, exec_beat=None, hard_timeout=None):
+        self.state, self.session = state, session
+        self._runtime_cls = runtime_cls
+        self._exec_beat = exec_beat or kernel_beat
+        self._hard_timeout = BEAT_TIMEOUT_S + 30 if hard_timeout is None else hard_timeout
+        self.fails = 0
+        self.exec_left = 0
+        self.disabled = os.environ.get('COLAB_KEEPALIVE_BEAT', '').strip().lower() == 'exec'
+
+    def via(self) -> str:
+        return 'exec' if self.disabled or self.exec_left else 'inproc'
+
+    def _runtime(self):
+        if self._runtime_cls is None:
+            from colab_cli.runtime import ColabRuntime
+            self._runtime_cls = ColabRuntime
+        return self._runtime_cls
+
+    def _once(self) -> tuple:
+        s = self.state.get_session(self.session, ignore_missing_session=True)
+        if s is None:
+            return False, 'inproc no_session'
+
+        def on_kernel(kid):
+            s.kernel_id = kid
+            self.state.store.add(s)
+
+        def on_session(sid):
+            s.session_id = sid
+            self.state.store.add(s)
+
+        rt = self._runtime()(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id,
+                             on_kernel_started=on_kernel, on_session_started=on_session)
+        try:
+            outputs = rt.execute_code(BEAT_CODE, timeout=BEAT_TIMEOUT_S) or []
+        finally:
+            try:
+                rt.stop()
+            except Exception:
+                pass
+        err = next((o for o in outputs if o.get('output_type') == 'error'), None)
+        if err is not None:
+            return False, 'inproc kernel_error %s' % err.get('ename', '')
+        return True, 'inproc'
+
+    def _guarded(self) -> tuple:
+        box = {}
+
+        def run():
+            try:
+                box['r'] = self._once()
+            except BaseException as e:  # a beat must never take the daemon down
+                box['r'] = (False, 'inproc %s: %s' % (type(e).__name__, str(e)[:120]))
+
+        t = threading.Thread(target=run, name='kernel-beat', daemon=True)
+        t.start()
+        t.join(self._hard_timeout)
+        if t.is_alive():
+            return False, 'inproc hung'
+        return box.get('r', (False, 'inproc no_result'))
+
+    def beat(self, beat_file: str) -> tuple:
+        """(ok, detail) for one beat; detail names the path that delivered it."""
+        if self.disabled or self.exec_left > 0:
+            self.exec_left = max(0, self.exec_left - 1)
+            return self._exec_beat(self.session, beat_file)
+        ok, detail = self._guarded()
+        if ok:
+            self.fails = 0
+            return ok, detail
+        self.fails += 1
+        if self.fails >= self.FALLBACK_AFTER:
+            self.fails, self.exec_left = 0, self.FALLBACK_BEATS
+        ok2, detail2 = self._exec_beat(self.session, beat_file)
+        return ok2, '%s; exec %s' % (detail, detail2)
+
+
 def refresh_endpoint(state, session, current, apply_proxy):
     """Re-read assignments. Return the endpoint to ping, or None if this session is gone."""
     assignments = state.client.list_assignments()
@@ -313,11 +415,12 @@ def main(argv: list[str]) -> int:
     slots_http = requests.Session()  # one kept-alive connection to /slots instead of a new TCP connect per minute
     beat_file = cfg / ('keepalive-%s-beat.py' % session)
     beat_file.write_text(BEAT_CODE, encoding='utf-8', newline='\n')
+    beater = InProcessBeat(state, session)
     exit_reason = 'loop_ended'
     try:
         while True:
             cycle_start = time.monotonic()
-            ok, detail = kernel_beat(session, str(beat_file))
+            ok, detail = beater.beat(str(beat_file))
             beats += 1
             if ok:
                 if beat_fails:
@@ -327,6 +430,8 @@ def main(argv: list[str]) -> int:
                 beat_fails += 1
                 if beat_fails == 1 or beat_fails % BEAT_FAIL_LOG_EVERY == 0:
                     log('kernel_beat_error n=%d consecutive=%d detail=%s' % (beats, beat_fails, detail))
+            if '; exec ' in detail:
+                log('kernel_beat_fallback n=%d detail=%s' % (beats, detail))
             if last_ping is not None and cycle_start - last_ping < PING_INTERVAL_S - 1:
                 time.sleep(max(0.0, BEAT_INTERVAL_S - (time.monotonic() - cycle_start)))
                 continue
@@ -350,8 +455,8 @@ def main(argv: list[str]) -> int:
             pings += 1
             if kind == 'ok':
                 errors = 0
-                log('keep_alive_ping n=%d result=%s beats=%d beat_fails=%d endpoint=%s' % (
-                    pings, detail, beats, beat_fails, endpoint))
+                log('keep_alive_ping n=%d result=%s beats=%d beat_fails=%d beat_via=%s endpoint=%s' % (
+                    pings, detail, beats, beat_fails, beater.via(), endpoint))
             elif kind == 'http_4xx':
                 errors += 1
                 log('keep_alive_error n=%d consecutive_4xx=%d result=%s endpoint=%s' % (

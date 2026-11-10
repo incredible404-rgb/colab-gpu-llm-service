@@ -153,7 +153,7 @@ class RefreshEndpointTests(unittest.TestCase):
 class DaemonLoopTests(unittest.TestCase):
     """Drive main() for a few simulated minutes with every outside call faked."""
 
-    def _run(self, *, log_preload=b'', idle_min=0.5):
+    def _run(self, *, log_preload=b'', idle_min=0.5, in_process=False):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         home = Path(tmp.name)
@@ -161,7 +161,8 @@ class DaemonLoopTests(unittest.TestCase):
         cfg.mkdir(parents=True)
         if log_preload:
             (cfg / 'keepalive-s.log').write_bytes(log_preload)
-        local = types.SimpleNamespace(endpoint='ep', token='t', url='u', token_expires_at=None)
+        local = types.SimpleNamespace(endpoint='ep', token='t', url='u', token_expires_at=None,
+                                      kernel_id='k', session_id='sid')
         store = mock.Mock()
         store.get.return_value = local
         client = mock.Mock(colab_domain='https://colab.example')
@@ -169,7 +170,7 @@ class DaemonLoopTests(unittest.TestCase):
         client.session.get.return_value = types.SimpleNamespace(status_code=200)
         client.list_assignments.return_value = [
             types.SimpleNamespace(endpoint='ep', runtime_proxy_info=types.SimpleNamespace(token='t', url='u'))]
-        fake_state = types.SimpleNamespace(store=store, client=client)
+        fake_state = types.SimpleNamespace(store=store, client=client, get_session=lambda name, **kw: local)
         clock = {'now': 1000.0}
         sleeps = []
 
@@ -196,7 +197,8 @@ class DaemonLoopTests(unittest.TestCase):
         fake_file = str(home / 'repo/scripts/colab_keepalive.py')
         with mock.patch.object(ka, '__file__', fake_file), \
              mock.patch('pathlib.Path.home', return_value=home), \
-             mock.patch.dict(os.environ, {'TAILNET_FQDN': 'qwen.example.ts.net', 'LLAMA_API_KEY': 'k'}), \
+             mock.patch.dict(os.environ, {'TAILNET_FQDN': 'qwen.example.ts.net', 'LLAMA_API_KEY': 'k',
+                                          'COLAB_KEEPALIVE_BEAT': '' if in_process else 'exec'}), \
              mock.patch.object(ka, '_import_colab', return_value=(Exception, lambda: fake_state, apply_proxy, None)), \
              mock.patch.object(ka, 'kernel_beat', side_effect=lambda s, f: beats.append(clock['now']) or (True, 'rc0')), \
              mock.patch.object(ka, '_stop_session', side_effect=lambda s, log: stops.append(s)), \
@@ -227,6 +229,121 @@ class DaemonLoopTests(unittest.TestCase):
         self.assertTrue((run.cfg / 'keepalive-s.log.1').exists())
         self.assertLess((run.cfg / 'keepalive-s.log').stat().st_size, ka.LOG_MAX_BYTES)
         self.assertIn('keep_alive_started', (run.cfg / 'keepalive-s.log').read_text(encoding='utf-8'))
+
+
+class InProcessBeatTests(unittest.TestCase):
+    """The daemon's own kernel beat: same connect-execute-close shape as `colab exec`."""
+
+    def _state(self, session=None):
+        s = session if session is not None else types.SimpleNamespace(
+            url='https://proxy', token='tok', kernel_id='k1', session_id='sid')
+        store = mock.Mock()
+        state = types.SimpleNamespace(store=store, get_session=mock.Mock(return_value=s))
+        return state, s
+
+    def _runtime(self, outputs=None, exc=None, hang=None):
+        made = []
+
+        class FakeRuntime:
+            def __init__(self, url, token, **kw):
+                self.url, self.token, self.kw = url, token, kw
+                self.codes, self.stopped = [], False
+                made.append(self)
+
+            def execute_code(self, code, timeout=None):
+                self.codes.append((code, timeout))
+                if hang is not None:
+                    hang.wait(5)
+                if exc is not None:
+                    raise exc
+                return outputs or []
+
+            def stop(self):
+                self.stopped = True
+
+        return FakeRuntime, made
+
+    def test_beat_opens_a_fresh_socket_runs_the_beat_and_closes_it(self):
+        state, s = self._state()
+        rt, made = self._runtime()
+        execs = []
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=rt, exec_beat=lambda *a: execs.append(a) or (True, 'rc0'))
+        for _ in range(3):
+            self.assertEqual(b.beat('f.py'), (True, 'inproc'))
+        self.assertEqual(len(made), 3)  # one connection per beat, never a long-lived one
+        for r in made:
+            self.assertEqual((r.url, r.token, r.kw['kernel_id'], r.kw['session_id']),
+                             ('https://proxy', 'tok', 'k1', 'sid'))
+            self.assertEqual(r.codes, [(ka.BEAT_CODE, ka.BEAT_TIMEOUT_S)])
+            self.assertTrue(r.stopped)
+        state.get_session.assert_called_with('sess', ignore_missing_session=True)
+        self.assertEqual(execs, [])
+
+    def test_new_kernel_id_is_stored_like_colab_exec_does(self):
+        state, s = self._state()
+        rt, made = self._runtime()
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=rt)
+        b.beat('f.py')
+        made[0].kw['on_kernel_started']('k2')
+        self.assertEqual(s.kernel_id, 'k2')
+        state.store.add.assert_called_with(s)
+
+    def test_failure_retries_with_colab_exec_and_backs_off_after_three(self):
+        state, _ = self._state()
+        rt, made = self._runtime(exc=ConnectionError('ws refused'))
+        execs = []
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=rt, exec_beat=lambda *a: execs.append(a) or (True, 'rc0'))
+        ok, detail = b.beat('f.py')
+        self.assertTrue(ok)  # the beat still landed, through the CLI
+        self.assertIn('inproc ConnectionError', detail)
+        self.assertIn('; exec rc0', detail)
+        b.beat('f.py')
+        b.beat('f.py')
+        self.assertEqual(len(made), 3)
+        self.assertEqual(b.via(), 'exec')
+        for _ in range(ka.InProcessBeat.FALLBACK_BEATS):
+            self.assertEqual(b.beat('f.py'), (True, 'rc0'))
+        self.assertEqual(len(made), 3)  # no in-process attempts while backed off
+        self.assertEqual(b.via(), 'inproc')
+        b.beat('f.py')
+        self.assertEqual(len(made), 4)  # tried again afterwards
+        self.assertTrue(all(r.stopped for r in made))
+
+    def test_kernel_error_output_is_a_failed_beat(self):
+        state, _ = self._state()
+        rt, _ = self._runtime(outputs=[{'output_type': 'error', 'ename': 'OSError'}])
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=rt, exec_beat=lambda *a: (False, 'rc1 x'))
+        self.assertEqual(b.beat('f.py'), (False, 'inproc kernel_error OSError; exec rc1 x'))
+
+    def test_hung_beat_is_abandoned_within_the_hard_limit(self):
+        state, _ = self._state()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        rt, _ = self._runtime(hang=release)
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=rt, exec_beat=lambda *a: (True, 'rc0'), hard_timeout=0.2)
+        t0 = time.monotonic()
+        ok, detail = b.beat('f.py')
+        self.assertLess(time.monotonic() - t0, 2)
+        self.assertEqual((ok, detail), (True, 'inproc hung; exec rc0'))
+
+    def test_missing_session_and_env_switch(self):
+        state = types.SimpleNamespace(store=mock.Mock(), get_session=mock.Mock(return_value=None))
+        b = ka.InProcessBeat(state, 'sess', runtime_cls=self._runtime()[0], exec_beat=lambda *a: (False, 'rc1 gone'))
+        self.assertEqual(b.beat('f.py'), (False, 'inproc no_session; exec rc1 gone'))
+        with mock.patch.dict(os.environ, {'COLAB_KEEPALIVE_BEAT': 'exec'}):
+            rt, made = self._runtime()
+            b = ka.InProcessBeat(self._state()[0], 'sess', runtime_cls=rt, exec_beat=lambda *a: (True, 'rc0'))
+        self.assertEqual(b.beat('f.py'), (True, 'rc0'))
+        self.assertEqual(made, [])
+
+    def test_daemon_beats_in_process_without_starting_a_cli(self):
+        rt, made = self._runtime()
+        with mock.patch.object(ka.InProcessBeat, '_runtime', lambda self: rt):
+            run = DaemonLoopTests._run(self, in_process=True)
+        self.assertEqual(run.rc, 0)
+        self.assertEqual(run.beats, [])  # `colab exec` never ran
+        self.assertEqual(len(made), 3)
+        self.assertIn('beat_via=inproc', (run.cfg / 'keepalive-s.log').read_text(encoding='utf-8'))
 
 
 class CliStartupAndProbeTests(unittest.TestCase):

@@ -75,7 +75,7 @@ flowchart LR
 
 ## 主力轨道：官方 Colab CLI 无头启动 + 30 秒内核心跳
 
-自 CLI 0.7.5 起，由 CLI 创建的运行时（无论是 T4 还是 G4）若内核没有收到新的代码执行请求，会在创建后 21–35 分钟内被强制回收；单纯的 TFE ping、单个长跑单元格或正在进行的模型推理都不算数，且旧版 `RuntimeService/KeepAliveAssignment` RPC 会返回 `403 USER_PROJECT_DENIED`。每隔 30 秒执行一行轻量 `colab exec` 即可让 VM 持续存活（与 Wakeloom 本地模式同理）。2026-11-07 实测（见 `debug-runs/2026-11-07-*kernel-beat*`）：T4 对照组在 21.0 分钟被回收，而心跳组完整存活满 42 分钟；运行 `qwen38-fn` 的 G4 实例在 77 次心跳间持续对外服务满 39 分钟（仅在 Cell 1 启动期间出现 1 次预期的队列超时，启动完成后 0 失败），直至闲置守卫干净地将其关停。
+自 CLI 0.7.5 起，由 CLI 创建的运行时（无论是 T4 还是 G4）若内核没有收到新的代码执行请求，会在创建后 21–35 分钟内被强制回收；单纯的 TFE ping、单个长跑单元格或正在进行的模型推理都不算数，且旧版 `RuntimeService/KeepAliveAssignment` RPC 会返回 `403 USER_PROJECT_DENIED`。每隔 30 秒执行一行轻量 `colab exec` 即可让 VM 持续存活（与 Wakeloom 本地模式同理）。`colab_keepalive.py` 在守护进程内按同样方式执行（每拍新连一次内核 websocket、执行、断开），不再每 30 秒起一个 CLI 进程；进程内失败会立即改用 `colab exec` 补上这一拍，设 `COLAB_KEEPALIVE_BEAT=exec` 可整体回退。2026-11-10 在 CPU 运行时上实测进程内心跳：连续 37 分钟、75 拍、0 失败，运行时未被回收；守护进程平均每拍约 76 ms CPU（旧方式每拍起 CLI 约 1.1 s）。2026-11-07 实测（见 `debug-runs/2026-11-07-*kernel-beat*`）：T4 对照组在 21.0 分钟被回收，而心跳组完整存活满 42 分钟；运行 `qwen38-fn` 的 G4 实例在 77 次心跳间持续对外服务满 39 分钟（仅在 Cell 1 启动期间出现 1 次预期的队列超时，启动完成后 0 失败），直至闲置守卫干净地将其关停。
 
 `scripts/colab_cli.py` 封装并驱动官方 [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli)（通过 `uv tool install "google-colab-cli==0.7.5"` 安装，首次使用运行 `colab sessions` 完成一次授权）。它执行由 `colab_kernel.py` 生成的完全相同的 Cell 1 代码（`colab_kernel.py --list` 列出的任一现役或归档模型），仅剥离了纯前端尾部（横幅、WebUI 弹窗、停止按钮），全程无需打开浏览器标签页。
 
@@ -183,6 +183,7 @@ python scripts/colab_cli.py stop --all          # 用完立即释放，核验末
 | `DRIVEFS_DB` | 指定 Drive 客户端元数据库路径 |
 | `NOVEL_ROOT` | `local_novel_mcp.py` 向 WebUI 暴露的本机目录 |
 | `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌（受限或限速模型需要） |
+| `COLAB_KEEPALIVE_BEAT` | 设为 `exec` 时心跳改回每拍起一次 `colab exec`（默认在守护进程内执行，失败自动回退） |
 
 ### 常用命令速查
 
