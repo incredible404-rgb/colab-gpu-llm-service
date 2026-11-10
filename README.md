@@ -52,7 +52,7 @@ flowchart LR
     NB --> K
     SY --> K
     ME <-- "/tun/m/*" --> K
-    K --> TS["qwen.&lt;YOUR_TAILNET&gt;.ts.net<br/>仅 Tailnet 私网可见<br/>WebUI · /v1 · 本地文件桥"]
+    K --> TS["qwen.‹YOUR_TAILNET›.ts.net<br/>仅 Tailnet 私网可见<br/>WebUI · /v1 · 本地文件桥"]
 ```
 
 ## 极速冷启动

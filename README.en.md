@@ -52,7 +52,7 @@ flowchart LR
     NB --> K
     SY --> K
     ME <-- "/tun/m/*" --> K
-    K --> TS["qwen.&lt;YOUR_TAILNET&gt;.ts.net<br/>tailnet only<br/>WebUI · /v1 · local file bridge"]
+    K --> TS["qwen.‹YOUR_TAILNET›.ts.net<br/>tailnet only<br/>WebUI · /v1 · local file bridge"]
 ```
 
 ## Fast cold start
