@@ -7,10 +7,12 @@ Network Access headers so the browser connects directly to localhost without goi
 from __future__ import annotations
 
 import fnmatch
+import http.client
 import json
 import os
 import re
 import shutil
+import socket
 import sys
 import threading
 import time
@@ -1458,9 +1460,46 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class ExclusiveHTTPServer(ThreadingHTTPServer):
+    """One listener per port, so a second launch fails instead of silently sharing the port.
+
+    On Windows SO_REUSEADDR (HTTPServer's default) lets another process bind the same port and both
+    keep listening, with connections split between them; SO_EXCLUSIVEADDRUSE forbids that. On POSIX
+    SO_REUSEADDR never allows two listeners and only lets a restart rebind past TIME_WAIT, so keep it.
+    """
+    allow_reuse_address = os.name != 'nt'
+
+    def server_bind(self):
+        if os.name == 'nt' and hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def _running_root(port: int) -> str | None:
+    """NOVEL_ROOT reported by a local_novel_mcp already serving on port, or None if it is something else."""
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+        conn.request('GET', '/health')
+        resp = conn.getresponse()
+        data = json.loads(resp.read()) if resp.status == 200 else {}
+        conn.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    return data.get('root') if isinstance(data, dict) and data.get('ok') is True and 'root' in data else None
+
+
 def main():
     NOVEL_ROOT.mkdir(parents=True, exist_ok=True)
-    srv = ThreadingHTTPServer((HOST, PORT), MCPHandler)
+    try:
+        srv = ExclusiveHTTPServer((HOST, PORT), MCPHandler)
+    except OSError as exc:
+        root = _running_root(PORT)
+        if root is not None:
+            # The startup entry and a manual launch can both fire; the instance already serving wins.
+            print(f'local_novel_mcp already running on port {PORT} (root={root}); not starting another', flush=True)
+            return 0
+        print(f'local_novel_mcp: port {PORT} is taken by another program ({exc})', file=sys.stderr, flush=True)
+        return 1
     print(f'local_novel_mcp listening on http://{HOST}:{PORT}/mcp (root={NOVEL_ROOT})', flush=True)
     srv.serve_forever()
 

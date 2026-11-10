@@ -261,6 +261,7 @@ Division of labour: new instance or new model -> this repo's `colab_cli.py start
 | Instance vanishes after 20-35 minutes | The heartbeat process is not running (PC slept or it was killed); check with `status`, `start`/`launch` is what spawns it |
 | Still active or `[?]` after `stop --all` | In order: (1) the Colab-yoga bridge `stop_all` (`stop --all` already tries it; by hand: `runtime\python.exe -u bridge\colab_yoga_bridge.py stop_all`); (2) end the sessions by hand in Colab's web UI (Runtime, Manage sessions); (3) the browser driver `python -X utf8 scripts/colab_sync.py --release-all` (install Playwriter or similar first, see the fallback track). Verify with `status` |
 | Domain times out | A fresh Service approval takes a few to ten-odd seconds, retry; confirm Tailscale >= 1.78, MagicDNS and HTTPS Certificates are on in the DNS settings, and `autoApprovers.services` is in the ACL |
+| WebUI MCP card shows `proxy error: Failed to read connection` | The runtime side of the tunnel is up but nothing answers on the host's `:3426`: run `python -X utf8 scripts/local_novel_mcp.py` on the `local_tailscale_ip` machine, then press refresh on the card. If you autostart it from a drive that mounts after login (a cloud-drive letter, say), have the startup entry wait for the file first. Launching twice is safe: a second launch prints `already running` and exits, and a port held by another program makes it exit with an error |
 
 The full runbook, including how to onboard a model, is in [`SKILL.md`](SKILL.md) section 7 onward.
 

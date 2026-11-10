@@ -261,6 +261,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"   # 全部单�
 | 实例 20～35 分钟后消失 | 心跳进程没在跑（电脑休眠或被杀）；`status` 查看，`start`/`launch` 才会拉起保活 |
 | `stop --all` 后仍有 active 或 `[?]` | 依次：① Colab-yoga bridge `stop_all`（`stop --all` 已自动试，手动：`runtime\python.exe -u bridge\colab_yoga_bridge.py stop_all`）；② Colab 网页“代码执行程序 → 管理会话”手动终止；③ 浏览器驱动 `python -X utf8 scripts/colab_sync.py --release-all`（需先装 Playwriter 等，见后备轨道一节）。最后用 `status` 核验 |
 | 域名超时 | Service 审批刚生效需几秒到十几秒，重试；确认 Tailscale ≥ 1.78、DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services` |
+| WebUI 的 MCP 卡片报 `proxy error: Failed to read connection` | 运行时那头的隧道已通，但本机 `:3426` 没有程序在接：在 `local_tailscale_ip` 那台主机上运行 `python -X utf8 scripts/local_novel_mcp.py`，再点卡片上的刷新。设成开机自启时，脚本若放在登录后才挂载的盘（网盘映射盘等），启动项要等文件出现再拉起。重复启动是安全的：已有实例在跑时，后来的会打印 `already running` 后退出；端口被别的程序占用则报错退出 |
 
 更完整的排障与模型接入流程见 [`SKILL.md`](SKILL.md) 第 7 节。
 

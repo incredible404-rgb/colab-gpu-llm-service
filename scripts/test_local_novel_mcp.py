@@ -1,5 +1,6 @@
 """Isolated tests for local_novel_mcp tools; every test runs against a throwaway NOVEL_ROOT."""
 import http.client
+import io
 import json
 import os
 import shutil
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from unittest import mock
 
@@ -469,6 +471,66 @@ class SkillMapTest(unittest.TestCase):
             self.assertIn(name, desc)
         if not m.SKILL_MAP:
             self.assertNotIn('skill:', desc)
+
+
+class SingleInstanceTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='novel-mcp-single-'))
+        self._orig_root = m.NOVEL_ROOT
+        m.NOVEL_ROOT = self.tmp.resolve()
+        self.servers = []
+
+    def tearDown(self):
+        for srv in self.servers:
+            srv.shutdown()
+            srv.server_close()
+        m.NOVEL_ROOT = self._orig_root
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _serve(self, cls, handler=m.MCPHandler, port=0):
+        srv = cls(('127.0.0.1', port), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        return srv.server_address[1]
+
+    def _main_on(self, port):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(m, 'HOST', '127.0.0.1'), mock.patch.object(m, 'PORT', port), \
+                mock.patch('sys.stdout', out), mock.patch('sys.stderr', err):
+            rc = m.main()
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_second_exclusive_bind_fails(self):
+        port = self._serve(m.ExclusiveHTTPServer)
+        with self.assertRaises(OSError):
+            m.ExclusiveHTTPServer(('127.0.0.1', port), m.MCPHandler)
+
+    def test_cannot_join_an_old_reuseaddr_instance(self):
+        # Instances started before this fix bound with SO_REUSEADDR; a new launch must not share their port.
+        port = self._serve(m.ThreadingHTTPServer)
+        with self.assertRaises(OSError):
+            m.ExclusiveHTTPServer(('127.0.0.1', port), m.MCPHandler)
+
+    def test_main_exits_quietly_when_already_running(self):
+        port = self._serve(m.ExclusiveHTTPServer)
+        rc, out, err = self._main_on(port)
+        self.assertEqual(rc, 0)
+        self.assertIn('already running', out)
+        self.assertIn(str(m.NOVEL_ROOT), out)
+        self.assertEqual(err, '')
+
+    def test_main_fails_when_port_belongs_to_another_program(self):
+        port = self._serve(m.ExclusiveHTTPServer, handler=BaseHTTPRequestHandler)
+        rc, out, err = self._main_on(port)
+        self.assertEqual(rc, 1)
+        self.assertIn('taken by another program', err)
+        self.assertNotIn('already running', out)
+
+    def test_rebind_after_close(self):
+        srv = m.ExclusiveHTTPServer(('127.0.0.1', 0), m.MCPHandler)
+        port = srv.server_address[1]
+        srv.server_close()
+        self._serve(m.ExclusiveHTTPServer, port=port)
 
 
 if __name__ == '__main__':

@@ -250,5 +250,6 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 | `stop --all` 后仍有 active 或 `[?]` | 走第 6 节“`[?]` 幽灵实例”的三档顺序：先 Colab-yoga bridge `stop_all`，再 Colab 网页“管理会话”，最后才是浏览器驱动；`status` 核验 |
 | 浏览器后备轨道报 `playwriter is not installed`，或各档都不可用 | 没装驱动：按第 6 节第 3 档装 Playwriter（`npm install -g playwriter` + 扩展）或 `@playwright/cli`，并确认 Edge 里已登录 Google。急着停机就用前两档 |
 | 域名超时或解析不到 | Service 审批刚生效需几秒到十几秒，重试；确认本机 Tailscale ≥ 1.78 且在同一 tailnet，DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services`（见 `references/tailscale-serve.md`） |
+| WebUI 的 MCP 卡片报 `proxy error: Failed to read connection` | 运行时那头的隧道已通，但本机 `:3426` 没有程序在接：在 `local_tailscale_ip` 那台主机上运行 `python -X utf8 scripts/local_novel_mcp.py`，再点卡片上的刷新。设成开机自启时，脚本若放在登录后才挂载的盘（网盘映射盘等），启动项要等文件出现再拉起。重复启动是安全的：已有实例在跑时，后来的会打印 `already running` 后退出；端口被别的程序占用则报错退出 |
 | 首格报「需要重新启动服务，但缺少上次为扩大提示缓存而删掉的分片副本」 | 配置变更触发重启，再跑一次首格即自动重下被回收的显存专用分片 |
 | 测试失败 | 在 `scripts/` 下跑 `python -X utf8 -m unittest discover -p "test_*.py"`，按失败的模块名定位；改过 `MODELS` 声明多半是 AST/指纹检查在拦 |
