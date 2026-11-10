@@ -108,6 +108,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 | `webui_system_prompt` | `WEBUI_SYSTEM_PROMPT` | 可选。写进 WebUI 配置的默认系统提示；默认为空（不设系统提示）。多行文本在 JSON 里写成带 `\n` 的字符串 |
 | `notebooks_dir` | `COLAB_NOTEBOOKS_DIR` | 可选。生成私有 notebook 后额外镜像到的 Drive “Colab Notebooks”文件夹；默认不镜像（见下方安全说明） |
 | `novel_root` | `NOVEL_ROOT` | 可选。`local_novel_mcp.py` 向 WebUI 暴露的本机目录，默认 `~/Documents/colab-novel`；支持 `~` |
+| `novel_skill_map` | `NOVEL_SKILL_MAP` | 可选。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件；默认为空（不暴露任何目录外文件）。写成一个字符串，条目形如 `名字=文件路径`，用 `;` 或换行分隔，路径支持 `~`，例如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；改后要重启 `local_novel_mcp.py` |
 | `browsermcp_bridge` | `COLAB_BROWSERMCP_BRIDGE` | 可选。BrowserMCP 桥脚本（`.mjs`）路径，后备轨道的第一档浏览器驱动；不设则直接用 Playwriter / playwright-cli |
 
 示例文件里的 `<YOUR_...>` 都是占位符，不是可用值（直接复制不改，等于没填）；可选的后几项（`service_name` 及之后）不在示例文件里，需要时手动加键，可选项写成 `""` 等同于没填。其余可调环境变量：
@@ -133,7 +134,7 @@ python -X utf8 scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [
 python -X utf8 scripts/colab_cli.py launch [<slug>] [--skip-preflight]   # 后台脱离拉起（LAUNCH_DETACHED=1），轮询 /health
 python -X utf8 scripts/colab_cli.py verify [<slug>]          # 只重跑验证格
 python -X utf8 scripts/colab_cli.py status                   # CU 余额、燃烧率、活跃会话、心跳计数
-python -X utf8 scripts/colab_cli.py stop <slug>              # 只停这一个会话，绝不动别的（包括 Colab-yoga 的）
+python -X utf8 scripts/colab_cli.py stop <slug>              # 停这一个会话，并按 endpoint 清掉没有本地名字的 [?] 残留；有名字的会话（包括 Colab-yoga 的）绝不动
 python -X utf8 scripts/colab_cli.py stop --all               # 释放账号下全部分配；遇 [?] 幽灵实例按第 6 节的顺序处理
 
 # 模型清单 / 探测 / 生成
@@ -221,7 +222,7 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 - **A/B 基准（[`scripts/bench_ab.py`](scripts/bench_ab.py)）**：改参数（MTP 步数、KV 类型、量化、ubatch）时对已在跑的服务执行 `decode`、`recall`（8k/32k/128k/216k 大海捞针）、`tools`（48 次工具调用）与 `compare a.json b.json`。上线门槛：`recall` 全过、`tools` 0 失败。
 - **网络入口**：日常自用走 **Tailscale Service**（默认 `svc:qwen`，仅 tailnet 私网可见，**不鉴权**：没给 llama-server 加 `--api-key-file`，WebUI 才能免密即开即用，tailnet 就是唯一的门；配置了 `local_tailscale_ip` 时，经 SOCKS5 反连本机 `:3426` 的 `local_novel_mcp.py` 读写 `novel_root` 目录），详见 [`references/tailscale-serve.md`](references/tailscale-serve.md)。要暴露公网（Cloudflare Named Tunnel / Funnel）必须启用 `--api-key-file`，详见 [`references/secure-remote-service.md`](references/secure-remote-service.md)。
 - **`[?]` 幽灵实例（`colab sessions` 里没有本地会话名的云端实例）与 `stop --all` 后仍有 active**，按成本从低到高处理，**前两种不需要浏览器**：
-  1. `colab_cli.py stop --all` 已自动做：装了 Colab-yoga 时先调它的 bridge `stop_all`（按 endpoint 调官方 unassign；这会释放账号下**所有**分配，包括 Colab-yoga 正在用的）。只有 `stop --all` 会这样升级，`stop <slug>` 只停那一个名字，之后若还剩分配只会提示。手动等价命令（Git Bash）：`"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" stop_all`；cmd 里是 `"%LOCALAPPDATA%\Programs\Colab-yoga\runtime\python.exe" -u "%LOCALAPPDATA%\Programs\Colab-yoga\bridge\colab_yoga_bridge.py" stop_all`；目录以 `COLAB_YOGA_DIR` 为准。
+  1. `colab_cli.py stop --all` 已自动做：装了 Colab-yoga 时先调它的 bridge `stop_all`（按 endpoint 调官方 unassign；这会释放账号下**所有**分配，包括 Colab-yoga 正在用的）。只有 `stop --all` 会这样升级（释放整个账号）。`stop <slug>` 停完那一个名字后，只会对 `colab sessions` 里连续两次（间隔 5 秒）都显示为 `[?]` 的无名分配，经 colab CLI 自带客户端按 endpoint 逐个 unassign，再用 `usage` 与 `sessions` 核验；有本地名字的会话（含 Colab-yoga 的 easycolab）一律不碰，不调用 `stop_all`，释放不掉的会提示到网页“管理会话”手动终止。手动等价命令（Git Bash）：`"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" stop_all`；cmd 里是 `"%LOCALAPPDATA%\Programs\Colab-yoga\runtime\python.exe" -u "%LOCALAPPDATA%\Programs\Colab-yoga\bridge\colab_yoga_bridge.py" stop_all`；目录以 `COLAB_YOGA_DIR` 为准。
   2. 本人在 Colab 网页：右上角“代码执行程序 / Runtime” → “管理会话 / Manage sessions”，逐个终止。最终凭据永远是 `status` 的 `Active assignments: 0 | Burn rate: 0.00 CU/h`。
   3. 都不行且你有已登录 Google 的 Edge：`colab_cli.py stop --all` 的最后一档会调 `colab_sync.py --release-all`，经 `/tun/m/unassign/<endpoint>` 强杀并核验。这一档要先装浏览器驱动：
      - Playwriter：`npm install -g playwriter`，再给 Edge 装它的扩展（Chrome Web Store 上的 “Playwriter”），保持 Edge 打开并已登录 Google；非默认安装位置时设 `PLAYWRITER_ENTRY`。
@@ -245,6 +246,7 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 | Colab-yoga 看不到本仓库的模型，输出里有 `skipped exporting runners` | Colab-yoga 目录不存在或不是 `COLAB_YOGA_DIR` 指的那个；按第 4 节“runners 固定三步”重做，并确认出现 `Exported Colab-yoga runners to:` |
 | `colab new --gpu G4` 报 `Backend rejected accelerator` | G4 只有单一 176 GiB 规格，传 `--high-mem` 会被拒（`colab_cli.py` 已自动跳过）；也可能是账号无 G4 额度或当日无空闲卡，稍后重试 |
 | 实例 20～35 分钟后无故消失 | 心跳进程没在跑（电脑休眠或进程被杀）；`status` 看心跳计数，`start` / `launch` 才会拉起保活 |
+| `stop <slug>` 后仍有 active | 先看末尾提示：只剩有名字的会话（如 Colab-yoga）就是它们仍在运行，不是残留，按需单独停；`[?]` 已由 `stop <slug>` 按 endpoint 清过，清不掉的才走下一行 |
 | `stop --all` 后仍有 active 或 `[?]` | 走第 6 节“`[?]` 幽灵实例”的三档顺序：先 Colab-yoga bridge `stop_all`，再 Colab 网页“管理会话”，最后才是浏览器驱动；`status` 核验 |
 | 浏览器后备轨道报 `playwriter is not installed`，或各档都不可用 | 没装驱动：按第 6 节第 3 档装 Playwriter（`npm install -g playwriter` + 扩展）或 `@playwright/cli`，并确认 Edge 里已登录 Google。急着停机就用前两档 |
 | 域名超时或解析不到 | Service 审批刚生效需几秒到十几秒，重试；确认本机 Tailscale ≥ 1.78 且在同一 tailnet，DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services`（见 `references/tailscale-serve.md`） |

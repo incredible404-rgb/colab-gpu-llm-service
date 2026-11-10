@@ -237,30 +237,134 @@ class StartReusedSessionTests(unittest.TestCase):
 
 
 class StopScopeTests(unittest.TestCase):
-    def _stop(self, names, active):
-        leftovers = []
+    def _stop(self, names, active, unnamed=None, usages=None):
+        """`unnamed` is the list of "[?]" endpoint lists successive `colab sessions` calls return."""
+        leftovers, released = [], []
+        listings = [list(x) for x in (unnamed if unnamed is not None else [[]])]
+        usage_calls = list(usages or [])
+
+        def fake_unnamed():
+            return listings.pop(0) if len(listings) > 1 else listings[0]
+
+        def fake_usage():
+            if usage_calls:
+                return usage_calls.pop(0) if len(usage_calls) > 1 else usage_calls[0]
+            return {'balance': 1.0, 'rate': 10.0, 'active': active}
+
         with mock.patch.object(colab_cli, 'stop_keepalive'), \
                 mock.patch.object(colab_cli, 'colab', return_value='stopped\n'), \
                 mock.patch.object(colab_cli, 'sessions', return_value=['?']), \
                 mock.patch.object(colab_cli, '_schtasks_query_text', return_value=''), \
                 mock.patch.object(colab_cli, 'keepalive_state_sessions', return_value=[]), \
                 mock.patch.object(colab_cli.time, 'sleep'), \
-                mock.patch.object(colab_cli, 'usage', return_value={'balance': 1.0, 'rate': 10.0, 'active': active}), \
+                mock.patch.object(colab_cli, 'usage', side_effect=fake_usage), \
+                mock.patch.object(colab_cli, 'unnamed_endpoints', side_effect=fake_unnamed), \
+                mock.patch.object(colab_cli, 'unassign_endpoints',
+                                  side_effect=lambda eps: released.append(list(eps)) or True), \
+                mock.patch.object(colab_cli.subprocess, 'run', side_effect=AssertionError('no subprocess in stop')), \
                 mock.patch.object(colab_cli, '_release_leftovers',
                                   side_effect=lambda u: leftovers.append(u) or {**u, 'active': 0, 'rate': 0.0}), \
                 quiet() as out:
             rc = colab_cli.cmd_stop(names)
-        return rc, leftovers, out.getvalue()
+        return rc, leftovers, released, out.getvalue()
 
     def test_single_name_never_escalates_to_releasing_the_account(self):
-        rc, leftovers, out = self._stop(['solo'], active=1)
+        rc, leftovers, released, out = self._stop(['solo'], active=1)
         self.assertEqual(leftovers, [])
+        self.assertEqual(released, [])  # only named sessions are left: nothing to sweep
         self.assertEqual(rc, 1)
+        self.assertIn('local name', out)
+        self.assertIn('stop --all', out)
+
+    def test_single_name_releases_only_confirmed_unnamed_endpoints(self):
+        done = {'balance': 1.0, 'rate': 0.0, 'active': 0}
+        busy = {'balance': 1.0, 'rate': 10.0, 'active': 2}
+        # Listings: first look, recheck after the pause, post-release verification. ghost-b appears only once.
+        rc, leftovers, released, out = self._stop(
+            ['solo'], active=2, unnamed=[['ghost-a', 'ghost-b'], ['ghost-a'], []], usages=[busy] * 5 + [done])
+        self.assertEqual(released, [['ghost-a']])
+        self.assertEqual(leftovers, [])
+        self.assertEqual(rc, 0)
+        self.assertIn('ghost-a', out)
+        self.assertNotIn('ghost-b', out)
+
+    def test_named_session_survives_a_single_name_stop(self):
+        # Colab-yoga's easycolab keeps one assignment alive; the endpoint list holds only unnamed ones.
+        busy = {'balance': 1.0, 'rate': 5.0, 'active': 1}
+        rc, leftovers, released, out = self._stop(['solo'], active=1, unnamed=[[], []], usages=[busy])
+        self.assertEqual((released, leftovers, rc), ([], [], 1))
+
+    def test_a_ghost_that_cannot_be_released_is_reported_with_the_manual_route(self):
+        busy = {'balance': 1.0, 'rate': 10.0, 'active': 1}
+        rc, _, released, out = self._stop(['solo'], active=1, unnamed=[['g'], ['g'], ['g']], usages=[busy])
+        self.assertEqual(released, [['g']])
+        self.assertEqual(rc, 1)
+        self.assertIn('could not be released', out)
+        self.assertIn('Manage sessions', out)
 
     def test_stop_all_still_releases_leftovers(self):
-        rc, leftovers, _ = self._stop(['--all'], active=1)
+        rc, leftovers, released, _ = self._stop(['--all'], active=1)
         self.assertEqual(len(leftovers), 1)
+        self.assertEqual(released, [])
         self.assertEqual(rc, 0)
+
+
+class UnnamedReleaseTests(unittest.TestCase):
+    def test_release_unnamed_waits_then_confirms_before_unassigning(self):
+        pauses, released = [], []
+        listings = [['a', 'b'], ['b', 'c']]
+        with mock.patch.object(colab_cli, 'unnamed_endpoints', side_effect=lambda: listings.pop(0)), \
+                mock.patch.object(colab_cli, 'unassign_endpoints', side_effect=lambda eps: released.append(list(eps)) or True), \
+                quiet():
+            got = colab_cli.release_unnamed(sleep=pauses.append)
+        self.assertEqual(got, ['b'])
+        self.assertEqual(released, [['b']])
+        self.assertEqual(pauses, [colab_cli.UNNAMED_RECHECK_S])
+
+    def test_nothing_unnamed_means_no_pause_and_no_unassign(self):
+        pauses = []
+        with mock.patch.object(colab_cli, 'unnamed_endpoints', return_value=[]), \
+                mock.patch.object(colab_cli, 'unassign_endpoints', side_effect=AssertionError('nothing to release')):
+            self.assertEqual(colab_cli.release_unnamed(sleep=pauses.append), [])
+        self.assertEqual(pauses, [])
+
+    def test_endpoints_come_only_from_unnamed_lines(self):
+        out = ('[?] gpu-ghost | Hardware: G4 | Shape: High-RAM | Variant: GPU\n'
+               '[easycolab] gpu-yoga | Hardware: G4 | Shape: High-RAM | Variant: GPU\n'
+               '[qwen38-fn] m-s-x | Hardware: CPU | Shape: Standard | Variant: DEFAULT\n')
+        with mock.patch.object(colab_cli, 'colab', return_value=out):
+            self.assertEqual(colab_cli.unnamed_endpoints(), ['gpu-ghost'])
+            self.assertEqual(colab_cli.sessions(), ['?', 'easycolab', 'qwen38-fn'])
+
+    def test_unassign_runs_the_cli_client_per_endpoint_without_stop_all(self):
+        with tempfile.TemporaryDirectory() as td:
+            py = Path(td) / 'python.exe'
+            py.write_text('')
+            seen = {}
+
+            def fake_run(argv, **kw):
+                seen['argv'], seen['kw'] = argv, kw
+                return subprocess.CompletedProcess(argv, 0, 'released gpu-ghost\n', '')
+
+            with mock.patch.object(colab_cli, 'CLI_PYTHON', py), \
+                    mock.patch.object(colab_cli.subprocess, 'run', side_effect=fake_run), quiet():
+                self.assertTrue(colab_cli.unassign_endpoints(['gpu-ghost']))
+        argv = seen['argv']
+        self.assertEqual(argv[1:3], ['-I', '-c'])
+        self.assertEqual(argv[4:], ['gpu-ghost'])
+        self.assertIn('state.client.unassign(ep)', argv[3])
+        self.assertNotIn('stop_all', ' '.join(argv))
+        self.assertIs(seen['kw']['stdin'], subprocess.DEVNULL)
+
+    def test_unassign_without_the_cli_interpreter_does_nothing(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(colab_cli, 'CLI_PYTHON', Path(td) / 'missing.exe'), \
+                mock.patch.object(colab_cli.subprocess, 'run', side_effect=AssertionError('must not run')), quiet():
+            self.assertFalse(colab_cli.unassign_endpoints(['x']))
+            self.assertTrue(colab_cli.unassign_endpoints([]))
+
+    def test_embedded_unassign_code_is_valid_python(self):
+        ast.parse(colab_cli._UNASSIGN_CODE)
 
 
 class ColabInvocationTests(unittest.TestCase):

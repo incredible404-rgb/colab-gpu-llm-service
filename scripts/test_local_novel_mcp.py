@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import local_novel_mcp as m  # noqa: E402
@@ -432,6 +433,42 @@ class HttpKeepAliveTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         resp.read()
         conn.close()
+
+
+class SkillMapTest(unittest.TestCase):
+    def test_default_is_empty(self):
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(m, 'optional_setting', return_value=''):
+            os.environ.pop('NOVEL_SKILL_MAP', None)
+            self.assertEqual(m._skill_map(), {})
+
+    def test_parse_entries(self):
+        raw = 'retro=~/s/retro/SKILL.md; skill:style = /abs/style.md\nbad-entry;=nopath;noval=;ok=a=b'
+        got = m._parse_skill_map(raw)
+        self.assertEqual(set(got), {'skill:retro', 'skill:style', 'skill:ok'})
+        self.assertEqual(got['skill:retro'], Path.home() / 's/retro/SKILL.md')
+        self.assertEqual(got['skill:style'], Path('/abs/style.md'))
+        self.assertEqual(got['skill:ok'], Path('a=b'))
+
+    def test_secrets_value_used_and_env_wins(self):
+        with mock.patch.object(m, 'optional_setting', return_value='one=/p/one.md'):
+            with mock.patch.dict(os.environ, {'NOVEL_SKILL_MAP': 'two=/p/two.md'}):
+                self.assertEqual(set(m._skill_map()), {'skill:two'})
+            with mock.patch.dict(os.environ, {}):
+                os.environ.pop('NOVEL_SKILL_MAP', None)
+                self.assertEqual(set(m._skill_map()), {'skill:one'})
+
+    def test_safe_path_resolves_configured_skill_only(self):
+        with mock.patch.object(m, 'SKILL_MAP', {'skill:x': Path('/p/x.md')}):
+            self.assertEqual(m._safe_path('skill:x'), Path('/p/x.md'))
+            # An unconfigured skill: name is just a file name under the novel root, never a path elsewhere.
+            self.assertEqual(m._safe_path('skill:unknown').parent, m.NOVEL_ROOT)
+
+    def test_description_lists_only_configured_names(self):
+        desc = [t for t in m.TOOLS if t['name'] == 'read_novel_file'][0]['description']
+        for name in m.SKILL_MAP:
+            self.assertIn(name, desc)
+        if not m.SKILL_MAP:
+            self.assertNotIn('skill:', desc)
 
 
 if __name__ == '__main__':

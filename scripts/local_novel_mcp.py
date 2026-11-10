@@ -33,11 +33,32 @@ def _novel_root() -> Path:
 
 
 NOVEL_ROOT = _novel_root()
-SKILL_MAP = {
-    'skill:grilling': Path.home() / '.agents/upstream/mattpocock-skills/skills/productivity/grilling/SKILL.md',
-    'skill:prompting': Path.home() / '.agents/skills/universal-model-prompting/SKILL.md',
-    'skill:retro': Path.home() / '.agents/skills/retro/SKILL.md',
-}
+
+
+def _parse_skill_map(raw: str) -> dict:
+    """"name=path" entries separated by newlines or ';' -> {'skill:name': Path}. '~' is expanded.
+
+    Malformed entries (no '=', empty name or path) are skipped, so a typo disables one skill, not the server.
+    """
+    result = {}
+    for entry in re.split(r'[;\r\n]+', raw or ''):
+        name, sep, path = entry.partition('=')
+        name, path = name.strip().removeprefix('skill:').strip(), path.strip()
+        if sep and name and path:
+            result[f'skill:{name}'] = Path(path).expanduser()
+    return result
+
+
+def _skill_map() -> dict:
+    """$NOVEL_SKILL_MAP, else "novel_skill_map" in .secrets.json, else empty (no skill: paths exposed).
+
+    A string of "name=path" entries, e.g. "retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"; the model
+    then reads them as read_novel_file(path="skill:retro"). A file that does not exist is simply unreadable.
+    """
+    return _parse_skill_map(os.environ.get('NOVEL_SKILL_MAP') or optional_setting('novel_skill_map'))
+
+
+SKILL_MAP = _skill_map()
 SESSION_ID = 'local-novel-mcp-v1'
 
 
@@ -297,6 +318,7 @@ def _audit_write(tool: str, path: str, mode: str, old_bytes: int, new_bytes: int
         fh.write(json.dumps(rec, ensure_ascii=False) + '\n')
 
 
+_SKILL_HINT = '、'.join(f'"{k}"' for k in SKILL_MAP)
 TOOLS = [
     {
         'name': 'list_novel_files',
@@ -315,13 +337,13 @@ TOOLS = [
     {
         'name': 'read_novel_file',
         'title': '读取小说或写作要求文件',
-        'description': '读取小说目录内的 .md 文件（如 "小说1_吕凤先/写作要求.md"），支持 start_line/end_line 分段读取，或传 tail_lines=150 一步读取正文末尾最后 N 行；也支持传 "skill:grilling"、"skill:prompting"、"skill:retro" 按需读取技能。',
+        'description': '读取小说目录内的 .md 文件（如 "小说1_吕凤先/写作要求.md"），支持 start_line/end_line 分段读取，或传 tail_lines=150 一步读取正文末尾最后 N 行' + (f'；也支持传 {_SKILL_HINT} 按需读取技能' if _SKILL_HINT else '') + '。',
         'inputSchema': {
             'type': 'object',
             'properties': {
                 'path': {
                     'type': 'string',
-                    'description': '相对路径（如 "小说1_吕凤先/写作要求.md" 或 "小说1_吕凤先/性转吕凤先传（重写版）.md" 或 "skill:grilling"）',
+                    'description': '相对路径（如 "小说1_吕凤先/写作要求.md" 或 "小说1_吕凤先/性转吕凤先传（重写版）.md"）',
                 },
                 'start_line': {'type': 'integer', 'description': '起始行号（从 1 开始，可选）'},
                 'end_line': {'type': 'integer', 'description': '结束行号（含，可选）'},

@@ -1,8 +1,8 @@
 """Colab G4 kernel & notebook generator for Qwen3.8-Flash-Next (Huihui v2), Gemma-4-31B ARA Heretic, Qwen3.8-27B RVN BF16 & GLM-5.3-Flash GSQ-RCO-Q4.
 
 Single source of truth for the active llama.cpp G4 notebooks (`qwen38-huihui-v2`, `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`).
-Earlier Heretic V2 models were moved to archive/heretic-v2/ on 2026-11-09, and 122B/Nemotron/Ortenzya
-are frozen in archive/multi-model-kernel/; their last generated notebooks stay in notebooks/.
+Retired models (qwen38-fn, 122B, Nemotron, Ortenzya) are declared in archived_models.py and build on this same
+kernel; their last generated notebooks stay in notebooks/.
 - Runtime kernel: llama.cpp b12032, Tailscale svc:qwen + SOCKS5 bridge to local Windows
   novel MCP (local_tailscale_ip:3426), persistent --ui-config-file + --ui-mcp-proxy, /dev/shm tmpfs
   allocator, 32-stream zero-GIL downloader, millisecond size check (no startup SHA-256),

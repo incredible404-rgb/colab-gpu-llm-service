@@ -89,6 +89,7 @@ CONSOLE_MARKER = '就绪横幅 + WebUI 标签页 + 停机按钮'
 ENV = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
 CLI_DIR = Path.home() / '.config/colab-cli'
 CLI_PYTHONW = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'uv/tools/google-colab-cli/Scripts/pythonw.exe'
+CLI_PYTHON = CLI_PYTHONW.with_name('python.exe')  # same venv, with a console (stdout is read)
 KEEPALIVE = Path(__file__).with_name('colab_keepalive.py')
 # Not exported by subprocess on every Python build. Win32 CREATE_BREAKAWAY_FROM_JOB.
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
@@ -131,6 +132,16 @@ def colab(*args, check=True, timeout=180):
 def sessions() -> list[str]:
     # Lines look like "[name] <endpoint> | Hardware: ..."; "[?]" is a server assignment with no local name.
     return re.findall(r'^\[([^\]]+)\] \S+ \| Hardware', colab('sessions'), re.M)
+
+
+def session_endpoints() -> list[tuple[str, str]]:
+    """(local name, endpoint) for every assignment on the account; the name is "?" when this PC has none for it."""
+    return re.findall(r'^\[([^\]]+)\] (\S+) \| Hardware', colab('sessions'), re.M)
+
+
+def unnamed_endpoints() -> list[str]:
+    """Endpoints of the "[?]" assignments, i.e. the ones no local session name (Colab-yoga's included) points at."""
+    return [endpoint for name, endpoint in session_endpoints() if name == '?']
 
 
 def usage() -> dict:
@@ -772,6 +783,59 @@ def _release_leftovers(u: dict) -> dict:
     return u
 
 
+# Runs inside the colab CLI's own interpreter (the package is not importable from ours): the official client's
+# unassign, the call `colab stop` itself makes, one endpoint at a time. Nothing here can touch another endpoint.
+_UNASSIGN_CODE = """\
+import sys
+from colab_cli.common import state
+bad = 0
+for ep in sys.argv[1:]:
+    try:
+        state.client.unassign(ep)
+        print('released', ep, flush=True)
+    except BaseException as err:
+        bad += 1
+        print('failed', ep, type(err).__name__, flush=True)
+sys.exit(1 if bad else 0)
+"""
+UNNAMED_RECHECK_S = 5
+
+
+def unassign_endpoints(endpoints: list[str]) -> bool:
+    """Release exactly these endpoints through the colab CLI's client. True when every one succeeded."""
+    if not endpoints:
+        return True
+    if not CLI_PYTHON.exists():
+        print('[colab_cli] colab CLI interpreter not found at %s (install with: %s)' % (CLI_PYTHON, INSTALL_HINT), flush=True)
+        return False
+    try:
+        r = subprocess.run([str(CLI_PYTHON), '-I', '-c', _UNASSIGN_CODE, *endpoints], env=ENV, timeout=180, text=True,
+                           encoding='utf-8', errors='replace', capture_output=True, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as err:
+        print('[colab_cli] unassign failed: %s' % err, flush=True)
+        return False
+    print(((r.stdout or '') + (r.stderr or '')).strip(), flush=True)
+    return r.returncode == 0
+
+
+def release_unnamed(sleep=None) -> list[str]:
+    """Release the "[?]" assignments, by endpoint, and nothing else. Returns the endpoints it released.
+
+    Never calls stop_all and never touches an assignment that has a local name (a model session, Colab-yoga's
+    easycolab). An endpoint counts as unnamed only when it shows as "[?]" in two listings a few seconds apart:
+    a session that is being created is assigned on Colab a moment before its local name is written.
+    """
+    first = unnamed_endpoints()
+    if not first:
+        return []
+    (sleep or time.sleep)(UNNAMED_RECHECK_S)
+    confirmed = [ep for ep in unnamed_endpoints() if ep in first]
+    if confirmed:
+        print('[colab_cli] releasing %d unnamed [?] assignment(s) by endpoint: %s' % (len(confirmed), ', '.join(confirmed)), flush=True)
+        unassign_endpoints(confirmed)
+    return confirmed
+
+
 def cmd_stop(names: list[str]):
     stop_all = not names or names == ['--all']
     live, scheduled, state_sessions = [], [], []
@@ -797,11 +861,22 @@ def cmd_stop(names: list[str]):
         # Assignments the CLI has no local name for ("[?]") cannot be stopped by name.
         u = _release_leftovers(u)
     elif u['active']:
-        # Stopping one name never escalates: _release_leftovers frees the whole account, Colab-yoga's session
-        # included. Say what is left and how to clear it on purpose.
-        print('[colab_cli] %d assignment(s) still active after stopping %s (another session, or an unnamed [?] ghost). '
-              '`stop --all` releases every assignment on the account, so run it only when none of them is wanted.'
-              % (u['active'], ', '.join(named) or 'nothing'), flush=True)
+        # Stopping one name never escalates to the whole account (_release_leftovers would free Colab-yoga's session
+        # too). It only sweeps the "[?]" assignments nobody on this PC has a name for, by endpoint, then re-checks.
+        left = []
+        if release_unnamed():
+            for _ in range(4):
+                u, left = usage(), unnamed_endpoints()
+                if not left and u['active'] == 0:
+                    break
+                time.sleep(3)
+        if left:
+            print('[colab_cli] %d unnamed [?] assignment(s) could not be released: %s. Terminate them at '
+                  'https://colab.research.google.com > Runtime > Manage sessions.' % (len(left), ', '.join(left)), flush=True)
+        elif u['active']:
+            print('[colab_cli] %d assignment(s) still active after stopping %s; each has a local name (another session, '
+                  'e.g. Colab-yoga), so it was left running. `stop --all` releases every assignment on the account, '
+                  'so run it only when none of them is wanted.' % (u['active'], ', '.join(named) or 'nothing'), flush=True)
     print('Active assignments: %d | Burn rate: %.2f CU/h | Balance: %.2f CU' % (u['active'], u['rate'] or 0, u['balance'] or 0))
     return 0 if u['active'] == 0 else 1
 

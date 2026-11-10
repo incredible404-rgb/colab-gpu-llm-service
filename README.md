@@ -89,14 +89,14 @@ python -X utf8 scripts/colab_cli.py stop   --all          # 释放全部实例�
 ```
 
 - **模型代号（slug）：** 现役 `qwen38-huihui-v2`（默认）、`gemma4-31b`、`qwen38-27b-rvn`、`glm53-flash`；归档 `qwen38-fn`、`qwen38-fn-nl` 等可按 slug 直接启动。清单以 `python -X utf8 scripts/colab_kernel.py --list` 为准。
-- **停止时自动回退：** 若 `colab sessions` 显示存在无名 `[?]` 分配（例如从浏览器标签页启动的会话或孤立的 CLI 会话），`colab_cli.py stop --all`（只有它会这样升级；`stop <slug>` 只停那一个名字，绝不动别的会话，包括 Colab-yoga 的）按成本从低到高依次处理：① 装了 Colab-yoga 时调它的 bridge `stop_all`（按 endpoint 调官方 unassign，不需要浏览器）；② 仍有残留则调后备轨道的 `colab_sync.py --release-all`，通过 `/tun/m/unassign` 强制释放并核验 `0 active / 0.00 CU/h`（需要浏览器驱动）；③ 还不行就打印提示，请到 Colab 网页“代码执行程序 → 管理会话”手动终止。
+- **停止时自动回退：** 若 `colab sessions` 显示存在无名 `[?]` 分配（例如从浏览器标签页启动的会话或孤立的 CLI 会话），`colab_cli.py stop --all`（只有它会这样升级成释放整个账号；`stop <slug>` 停完那一个名字后，只会把连续两次都显示为 `[?]` 的无名分配按 endpoint 逐个释放并核验，绝不动有本地名字的会话，包括 Colab-yoga 的，也不调用 `stop_all`）按成本从低到高依次处理：① 装了 Colab-yoga 时调它的 bridge `stop_all`（按 endpoint 调官方 unassign，不需要浏览器）；② 仍有残留则调后备轨道的 `colab_sync.py --release-all`，通过 `/tun/m/unassign` 强制释放并核验 `0 active / 0.00 CU/h`（需要浏览器驱动）；③ 还不行就打印提示，请到 Colab 网页“代码执行程序 → 管理会话”手动终止。
 - CLI 会话无法读取 Colab Secrets 或挂载 Google Drive；内核直接从锁定的 Hugging Face commit 下载权重，并在本地存在 `HF_TOKEN` 时自动转发。此外 G4 不接受 `--high-mem` 参数，且 `colab exec` 默认 30 秒超时（需显式传 `--timeout`），脚本已内置处理这两项细节。
 
 ## 后备轨道：浏览器标签页同步、零 OAuth CU 计费与幽灵会话强杀
 
 在以下场景下，可随时使用浏览器工作流作为后备：
 1. 需要交互式 Cell 1 控制台（一键切换 LoRA、网页停止按钮）或 Cell 2 **不释放 G4 VM 的实例内模型热切换**；
-2. 运行已归档冻结的多模型 Notebook（`qwen3.5-122b`、`nemotron-120b`，位于 `archive/multi-model-kernel/`）或实验性的 Strata Notebook；
+2. 运行已归档模型（`qwen35-122b`、`nemotron-120b` 等，声明在 `scripts/archived_models.py`，用最新内核按名生成）或实验性的 Strata Notebook；
 3. CLI OAuth 令牌过期或未配置，希望直接在已登录的 Edge 标签页内（`BrowserMCP → Playwriter → playwright-cli`）零 OAuth 操作；
 4. 需要打印双轨 CU 账单，或清扫 CLI 无法按名称寻址的 `[?]` 幽灵会话。
 
@@ -197,6 +197,7 @@ python -X utf8 scripts/colab_cli.py stop --all  # 用完立即释放，核验末
 | `webui_system_prompt` | 可选。写进 WebUI 配置的默认系统提示，默认为空（不设） |
 | `notebooks_dir` | 可选。生成私有 Notebook 后额外镜像到的 Drive “Colab Notebooks”目录，默认不镜像 |
 | `novel_root` | 可选。`local_novel_mcp.py` 向 WebUI 暴露的本机目录，默认 `~/Documents/colab-novel`，支持 `~` |
+| `novel_skill_map` | 可选。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件，默认为空（不暴露目录外文件）。字符串，条目 `名字=文件路径` 用 `;` 或换行分隔，路径支持 `~`，如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；环境变量 `NOVEL_SKILL_MAP`，改后重启 `local_novel_mcp.py` |
 | `browsermcp_bridge` | 可选。BrowserMCP 桥脚本路径，后备轨道的第一档驱动；不设则直接用 Playwriter / playwright-cli |
 
 示例文件里的 `<YOUR_...>` 是占位符，不是可用值；可选字段（`service_name` 及之后）不在示例文件里，需要时手动加键，写成 `""` 等同于没填。每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`、`WEBUI_SYSTEM_PROMPT`、`COLAB_NOTEBOOKS_DIR`、`NOVEL_ROOT`、`COLAB_BROWSERMCP_BRIDGE`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符（可选项则为空）。其他可调环境变量：
@@ -216,7 +217,7 @@ python -X utf8 scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [
 python -X utf8 scripts/colab_cli.py launch [<slug>] [--skip-preflight]   # 后台分离启动（读取 notebooks/private/ 里的私有构建，没有时回退 notebooks/；需先 colab_kernel.py <slug> 生成）
 python -X utf8 scripts/colab_cli.py verify [<slug>]       # 只重跑验证 cell
 python -X utf8 scripts/colab_cli.py status                # 余额、燃烧率、活动会话、心跳与闲置守卫
-python -X utf8 scripts/colab_cli.py stop <slug>           # 只停这一个会话，不动别的
+python -X utf8 scripts/colab_cli.py stop <slug>           # 停这一个会话，并按 endpoint 清掉无本地名字的 [?] 残留；有名字的会话不动
 python -X utf8 scripts/colab_cli.py stop --all            # 释放账号下全部分配；残留无名 [?] 会话时先 Colab-yoga bridge，再 colab_sync
 python -X utf8 scripts/colab_cli.py yoga [gui | wake | status | stop]   # 可选：Colab-yoga 协同（旧名 easycolab 仍可用）
 
@@ -299,7 +300,6 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 | `scripts/update-pi-provider.ps1` | 将服务端点注册进本地 pi provider 列表 |
 | `scripts/test_*.py` | 单元测试：保活与 CLI、内核与启动指纹、Colab-yoga 对接、首次运行安全（占位符、失败释放、可选项）、本地 MCP、计费、基准 |
 | `references/` | 各模型说明、CU 预算核算、Tailscale 与远程接入指南 |
-| `archive/multi-model-kernel/` | 已归档冻结的多模型内核、生成器与说明（122B、Nemotron、Gemma） |
 | `debug-runs/` | 2026-11-07 T4 对照/心跳 A/B 实验与 G4 长稳测试日志 |
 | `notebooks/` | 脱敏后的生成版 Notebook；`notebooks/private/`（git 忽略）放本地私有构建 |
 | `.secrets.example.json` | 配置模板 |
