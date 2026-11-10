@@ -14,12 +14,14 @@ const [driveId, url] = process.argv.slice(2);
 const js = fs.readFileSync(0, "utf8");
 const out = (o) => process.stdout.write("PWJSON " + JSON.stringify(o) + "\n");
 const firstLine = (e) => String(e?.message || e).split("\n")[0];
-const entry = path.join(os.homedir(), "AppData", "Roaming", "npm", "node_modules", "playwriter", "dist", "index.js");
+// PLAYWRITER_ENTRY overrides; the default is the Windows global npm prefix (`npm install -g playwriter`).
+const entry = process.env.PLAYWRITER_ENTRY
+  || path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "npm", "node_modules", "playwriter", "dist", "index.js");
 process.env.PLAYWRITER_TELEMETRY ??= "0";
 
 let conn;
 try {
-  if (!fs.existsSync(entry)) throw new Error("playwriter is not installed");
+  if (!fs.existsSync(entry)) throw new Error("playwriter is not installed (npm install -g playwriter, or set PLAYWRITER_ENTRY to its dist/index.js)");
   const { connectViaExtension } = await import(pathToFileURL(entry).href);
   conn = await Promise.race([
     connectViaExtension({ tabGroup: "colab", tabGroupColor: "orange" }),

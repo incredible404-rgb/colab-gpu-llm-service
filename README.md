@@ -22,7 +22,7 @@ Colab 运行时是一次性的，每次新会话都会清空 `/content`，因此
 | `llama.cpp` MTP 投机解码 | 针对代码、工具调用与长文写作调优的 MTP 草稿头投机解码 |
 | Tailscale Service（`svc:qwen`）+ 可选本机 MCP 文件桥（`local_novel_mcp.py`） | 跨运行时固定不变的 `qwen.<YOUR_TAILNET>.ts.net` 入口地址，搭配反向 SOCKS5 桥让 WebUI 无需弹窗确认即可读写本地目录 |
 | **后备轨道：** 浏览器标签页同步、零 OAuth CU 计费与幽灵会话强杀（`colab_sync.py`、`colab_meter.py`） | 在已登录浏览器标签页推送/运行 Notebook、免 OAuth 读取实时余额与燃烧率、打印双轨 CU 账单，并强杀关掉页面后残留的无名 `[?]` 会话 |
-| 可选配套 [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 托盘工作台（`colab_cli.py yoga`） | 与本仓库共用同一台 G4；`colab_kernel.py` 把现役模型的无头首格导出为它的 `colab_kernel_runners.json` |
+| 可选配套 [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 托盘 GPU 管理台（`colab_cli.py yoga`） | 只管 LLM 服务（不含视频/生图/ComfyUI）：看状态与 CU、续时、切换模型、释放；与本仓库共用同一台 G4。`colab_kernel.py` 把现役模型的无头首格导出为它的 `colab_kernel_runners.json` |
 | `.secrets.json` + `--sanitized` | Notebook 由私有配置生成；脱敏构建（sanitized build）不含任何真实密钥、Tailnet 名称或 Google Drive 文件 ID |
 
 ## 架构全景
@@ -77,19 +77,19 @@ flowchart LR
 
 自 CLI 0.7.5 起，由 CLI 创建的运行时（无论是 T4 还是 G4）若内核没有收到新的代码执行请求，会在创建后 21–35 分钟内被强制回收；单纯的 TFE ping、单个长跑单元格或正在进行的模型推理都不算数，且旧版 `RuntimeService/KeepAliveAssignment` RPC 会返回 `403 USER_PROJECT_DENIED`。每隔 30 秒执行一行轻量 `colab exec` 即可让 VM 持续存活（与 Wakeloom 本地模式同理）。`colab_keepalive.py` 在守护进程内按同样方式执行（每拍新连一次内核 websocket、执行、断开），不再每 30 秒起一个 CLI 进程；进程内失败会立即改用 `colab exec` 补上这一拍，设 `COLAB_KEEPALIVE_BEAT=exec` 可整体回退。2026-11-10 在 CPU 运行时上实测进程内心跳：连续 37 分钟、75 拍、0 失败，运行时未被回收；守护进程平均每拍约 76 ms CPU（旧方式每拍起 CLI 约 1.1 s）。2026-11-07 实测（见 `debug-runs/2026-11-07-*kernel-beat*`）：T4 对照组在 21.0 分钟被回收，而心跳组完整存活满 42 分钟；运行 `qwen38-fn` 的 G4 实例在 77 次心跳间持续对外服务满 39 分钟（仅在 Cell 1 启动期间出现 1 次预期的队列超时，启动完成后 0 失败），直至闲置守卫干净地将其关停。
 
-`scripts/colab_cli.py` 封装并驱动官方 [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli)（通过 `uv tool install "google-colab-cli==0.7.5"` 安装，首次使用运行 `colab sessions` 完成一次授权）。它执行由 `colab_kernel.py` 生成的完全相同的 Cell 1 代码（`colab_kernel.py --list` 列出的任一现役或归档模型），仅剥离了纯前端尾部（横幅、WebUI 弹窗、停止按钮），全程无需打开浏览器标签页。
+`scripts/colab_cli.py` 封装并驱动官方 [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli)（通过 `uv tool install "google-colab-cli==0.7.5"` 安装；首次 OAuth 授权必须由本人在自己的终端完成，见下方“前置条件”）。它执行由 `colab_kernel.py` 生成的完全相同的 Cell 1 代码（`colab_kernel.py --list` 列出的任一现役或归档模型），仅剥离了纯前端尾部（横幅、WebUI 弹窗、停止按钮），全程无需打开浏览器标签页。
 
 CLI 0.7 移除了自带的保活守护进程。`start` 与 `launch` 会使用 CLI 自身的 Python 解释器在后台独立拉起 `scripts/colab_keepalive.py`：每 30 秒发送一次内核心跳，每 60 秒请求一次 `GET /tun/m/<endpoint>/keep-alive/`（带 `X-Colab-Tunnel: Google` 头），同时通过 Tailscale 轮询 `/slots`，在连续 `--idle-min`（默认 45）分钟无推理活动后自动执行 `colab stop`。若本地电脑休眠，心跳随之停止，Colab 会在约 20 分钟内自动回收 VM。
 
 ```bash
-python scripts/colab_cli.py start  [<slug>]    # 分配 G4 -> 跑 cell 1 -> 检查 Tailscale /v1/models -> 跑验证 cell
-python scripts/colab_cli.py launch [<slug>]    # 后台分离启动 cell 1 (LAUNCH_DETACHED=1) -> 轮询 /health
-python scripts/colab_cli.py status                # 查看余额、燃烧率、活动会话、心跳与闲置守卫状态
-python scripts/colab_cli.py stop   --all          # 释放全部实例；若残留无名会话则自动回退调用 colab_sync --release-all
+python -X utf8 scripts/colab_cli.py start  [<slug>]    # 分配 G4 -> 跑 cell 1 -> 检查 Tailscale /v1/models -> 跑验证 cell
+python -X utf8 scripts/colab_cli.py launch [<slug>]    # 后台分离启动 cell 1 (LAUNCH_DETACHED=1) -> 轮询 /health
+python -X utf8 scripts/colab_cli.py status                # 查看余额、燃烧率、活动会话、心跳与闲置守卫状态
+python -X utf8 scripts/colab_cli.py stop   --all          # 释放全部实例；若残留无名会话则自动回退调用 colab_sync --release-all
 ```
 
-- **模型代号（slug）：** 现役 `qwen38-huihui-v2`（默认）、`gemma4-31b`、`qwen38-27b-rvn`、`glm53-flash`；归档 `qwen38-fn`、`qwen38-fn-nl` 等可按 slug 直接启动。清单以 `python scripts/colab_kernel.py --list` 为准。
-- **停止时自动回退：** 若 `colab sessions` 显示存在无名 `[?]` 分配（例如从浏览器标签页启动的会话或孤立的 CLI 会话），`colab_cli.py stop --all` 会自动调用后备轨道的 `colab_sync.py --release-all`，通过 `/tun/m/unassign` 强制释放并核验 `0 active / 0.00 CU/h`。
+- **模型代号（slug）：** 现役 `qwen38-huihui-v2`（默认）、`gemma4-31b`、`qwen38-27b-rvn`、`glm53-flash`；归档 `qwen38-fn`、`qwen38-fn-nl` 等可按 slug 直接启动。清单以 `python -X utf8 scripts/colab_kernel.py --list` 为准。
+- **停止时自动回退：** 若 `colab sessions` 显示存在无名 `[?]` 分配（例如从浏览器标签页启动的会话或孤立的 CLI 会话），`colab_cli.py stop --all` 按成本从低到高依次处理：① 装了 Colab-yoga 时调它的 bridge `stop_all`（按 endpoint 调官方 unassign，不需要浏览器）；② 仍有残留则调后备轨道的 `colab_sync.py --release-all`，通过 `/tun/m/unassign` 强制释放并核验 `0 active / 0.00 CU/h`（需要浏览器驱动）；③ 还不行就打印提示，请到 Colab 网页“代码执行程序 → 管理会话”手动终止。
 - CLI 会话无法读取 Colab Secrets 或挂载 Google Drive；内核直接从锁定的 Hugging Face commit 下载权重，并在本地存在 `HF_TOKEN` 时自动转发。此外 G4 不接受 `--high-mem` 参数，且 `colab exec` 默认 30 秒超时（需显式传 `--timeout`），脚本已内置处理这两项细节。
 
 ## 后备轨道：浏览器标签页同步、零 OAuth CU 计费与幽灵会话强杀
@@ -102,16 +102,18 @@ python scripts/colab_cli.py stop   --all          # 释放全部实例；若残�
 
 Colab 官方网页前端通过 `/tun/m/*` 接口通信。本轨道脚本直接在已登录的 `colab.research.google.com` 标签页上下文内调用这些接口，因此不需要额外的 OAuth 客户端或 API Key。
 
+浏览器驱动本身是可选的，仓库不自带，需要时再装：Playwriter（`npm install -g playwriter`，再给 Edge 装它在 Chrome Web Store 的扩展）或 `@playwright/cli`（`npm install -g @playwright/cli`），都要求 Node.js 和已登录 Google 的 Edge；也可以自备 BrowserMCP 桥脚本，路径写进环境变量 `COLAB_BROWSERMCP_BRIDGE` 或 `.secrets.json` 的 `browsermcp_bridge`。没装驱动不影响主力轨道；要紧急停机时先用 Colab-yoga bridge 或 Colab 网页，不必等浏览器驱动。
+
 ```bash
-python scripts/colab_meter.py status
-# Active assignments: 0 | Burn rate: 0.00 CU/h | Balance: 988.85 CU | Eligible GPUs: H100, G4, A100, L4, T4
+python -X utf8 scripts/colab_meter.py status
+# Active assignments: 0 | Burn rate: 0.00 CU/h | Balance: <你的余额> CU | Eligible GPUs: H100, G4, A100, L4, T4   (示意输出)
 
-python scripts/colab_meter.py start -s g4 -g G4     # 记录初始算力余额与启动时间
-python scripts/colab_meter.py stop  -s g4           # 强杀实例、核验释放结果并打印双轨账单
-python scripts/colab_meter.py stop  --all           # 清空所有活动分配
+python -X utf8 scripts/colab_meter.py start -s g4 -g G4     # 记录初始算力余额与启动时间
+python -X utf8 scripts/colab_meter.py stop  -s g4           # 强杀实例、核验释放结果并打印双轨账单
+python -X utf8 scripts/colab_meter.py stop  --all           # 清空所有活动分配
 
-python scripts/colab_sync.py --status               # 同样的实时状态读取，无需本地计费状态文件
-python scripts/colab_sync.py --release-all          # 强杀全部活动实例并核验
+python -X utf8 scripts/colab_sync.py --status               # 同样的实时状态读取，无需本地计费状态文件
+python -X utf8 scripts/colab_sync.py --release-all          # 强杀全部活动实例并核验
 ```
 
 **标签页免打扰。** 使用虚拟 Drive ID `__ANY__` 时，若浏览器里已有打开的 Colab 标签页，脚本直接原位借用（绝不刷新或跳转页面）；若当前没有打开的 Colab 标签页，则在后台静默新建一个临时标签页，调用完成后立即关闭。
@@ -141,10 +143,26 @@ python scripts/colab_sync.py --release-all          # 强杀全部活动实例�
 |---|---|
 | Colab 付费额度 | Colab Pro / Pro+ / Ultra 订阅或按量购买的计算单元（CU），账号需能选 G4；免费档不行。费率与额度会变，估算见 [`references/cu-budget.md`](references/cu-budget.md) |
 | 主机 | Windows 10/11、Python 3.10+、Git；`pip install requests`（其余依赖均为标准库）。脚本用计划任务与 `taskkill` 清理保活进程，macOS/Linux 未验证 |
-| 官方 Colab CLI | `uv tool install "google-colab-cli==0.7.5"`，随后运行一次 `colab sessions` 完成 OAuth 授权。保活机制按 0.7.5 的回收行为设计，请固定此版本 |
-| Tailscale | 本机客户端 ≥ 1.78 并已登录；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签与 OAuth 客户端，步骤见 [`references/tailscale-serve.md`](references/tailscale-serve.md) |
-| 可选：Colab-yoga | Windows 托盘多模态工作台（[Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)），装到 `%LOCALAPPDATA%\Programs\Colab-yoga` 后与本仓库共用同一台 G4；不装不影响任何核心命令 |
-| 可选：后备轨道 | Node.js，以及已登录 Google 账号并安装 BrowserMCP 扩展的 Edge（Playwriter 或 `@playwright/cli` 作后备） |
+| 官方 Colab CLI | `uv tool install "google-colab-cli==0.7.5"`，随后执行 `uv tool update-shell` 把 uv 的工具目录写进 PATH，**关闭并重开终端**再用 `colab --version` 验证。保活机制按 0.7.5 的回收行为设计，请固定此版本 |
+| 首次 OAuth 授权 | 由**本人在自己的终端**跑 `colab sessions`，打开它打印的链接授权，把授权码粘回终端（它用 `input()` 等输入，agent 没有交互 stdin 会卡死）。或用 Colab-yoga 的 bridge 两步：`runtime\python.exe -u bridge\colab_yoga_bridge.py auth_url` 取链接，授权后 `... auth_code <授权码>`。两边共用 `~/.config/colab-cli/token.json` |
+| Tailscale | 本机客户端 ≥ 1.78 并已登录；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签与 OAuth 客户端，并在 DNS 设置里开启 **MagicDNS** 与 **HTTPS Certificates**，步骤见 [`references/tailscale-serve.md`](references/tailscale-serve.md) |
+| 可选：Colab-yoga | Windows 托盘 GPU 管理台（[Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)，只管 LLM 服务，不含视频/生图/ComfyUI），装到 `%LOCALAPPDATA%\Programs\Colab-yoga` 后与本仓库共用同一台 G4；不装不影响任何核心命令 |
+| 可选：后备轨道 | Node.js，以及已登录 Google 账号的 Edge，加一个浏览器驱动：Playwriter（`npm install -g playwriter` + 其 Edge 扩展）或 `@playwright/cli`（`npm install -g @playwright/cli`），或自备 BrowserMCP 桥（`COLAB_BROWSERMCP_BRIDGE`） |
+
+**费用：** G4 实测约 **10 CU/小时**（`debug-runs/` 里 2026-11-07 两次开机均为 `rate 10.05 CU/h`；以 Colab 页面和 `colab_cli.py status` 的当日值为准）。冷启动实测 2～2.5 分钟，大权重更久，这段同样计费；用 2 小时约 20～25 CU。保活进程 45 分钟无推理流量自动停机。
+
+### 安装为 agent 技能
+
+本仓库自带 `SKILL.md`（frontmatter 里有 `name` 和触发描述），整个仓库克隆进 agent 的技能目录即可：
+
+```bash
+# Claude Code
+git clone https://github.com/incredible404-rgb/colab-gpu-llm-service.git ~/.claude/skills/colab-gpu-llm-service
+# 其他读取 ~/.agents/skills 的 agent
+git clone https://github.com/incredible404-rgb/colab-gpu-llm-service.git ~/.agents/skills/colab-gpu-llm-service
+```
+
+之后按下面“从克隆到第一次开机”在该目录里完成安装。技能目录可能被重装或更新覆盖，密钥建议不放 `.secrets.json`，改用环境变量（`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`，见下表）；`.secrets.json` 仅在仓库根目录被读取，暂不支持放到仓库外。两边分工：起模型、换模型用本仓库的 `start`；托盘 Colab-yoga 负责查看、续时、切换和释放。
 
 ### 从克隆到第一次开机
 
@@ -154,72 +172,91 @@ cd colab-gpu-llm-service
 pip install requests
 cp .secrets.example.json .secrets.json          # 按下表填写；该文件已在 .gitignore 中忽略
 
-python scripts/colab_kernel.py --list           # 现役/归档模型 slug；start 不带 slug 时用现役表第一个
-python scripts/colab_cli.py status              # 只读自检：CLI 已授权、读得到 CU 余额，不分配 GPU
-python scripts/colab_cli.py start               # 分配 G4 -> 跑 cell 1 -> 检查 Tailscale /v1/models -> 跑验证 cell
-python scripts/colab_cli.py stop --all          # 用完立即释放，核验末行 0 active / 0.00 CU/h
+python -X utf8 scripts/colab_kernel.py --list   # 现役/归档模型 slug；start 不带 slug 时用现役表第一个
+python -X utf8 scripts/colab_cli.py status      # 只读自检：CLI 已授权、读得到 CU 余额，不分配 GPU
+python -X utf8 scripts/colab_cli.py start > start.log 2>&1 &   # 放后台：分配 G4 -> 跑 cell 1 -> 检查 Tailscale /v1/models -> 跑验证 cell
+python -X utf8 scripts/colab_cli.py stop --all  # 用完立即释放，核验末行 0 active / 0.00 CU/h
 ```
+
+`start` 要分配实例、下载百 GB 级权重，可能阻塞数分钟到一小时，**不要在前台等**（会被 agent 工具的单次调用超时打断）：放后台（Git Bash 用 `&`，PowerShell 用 `Start-Process`，agent 工具用它的后台运行），盯日志里的 `[colab_cli] start OK` 或 `start FAILED`。`.secrets.json` 必填四项为空或仍是示例里的 `<YOUR_...>` 时，`start` 在分配之前就退出，不会烧 CU；失败时脚本会自动释放它创建的实例，仍请用 `status` 核验 `0 active`。
 
 `start` 成功后会输出 `[colab_cli] start OK in <秒>s`；之后 `http://qwen.<YOUR_TAILNET>.ts.net:443/v1` 是 OpenAI 兼容端点（Bearer 密钥为 `.secrets.json` 的 `api_key`），根路径是 WebUI，二者仅 tailnet 内可见。
 
 ### `.secrets.json` 字段说明
 
-前四项是 `start` 的必填项，缺一项会直接报 `missing ... in .secrets.json / environment`。
+前四项是 `start` 的必填项，缺一项（或仍是示例文件里的 `<YOUR_...>` 占位符）会在分配 GPU 之前直接报 `missing ... in .secrets.json / environment`。
 
 | 字段 | 含义 |
 |---|---|
 | `api_key` | 你自定义的任意长随机串，写入运行时的 llama-server 作 Bearer 密钥，也是你访问 `/v1` 的密钥 |
 | `ts_client_id`、`ts_client_secret` | Tailscale OAuth 客户端凭据（仅 Auth Keys: Write，标签 `tag:colab`），运行时用它现签一次性临时认证密钥 |
 | `tailnet_fqdn` | 服务访问域名，形如 `qwen.<YOUR_TAILNET>.ts.net`（`qwen` 是你建的 Service 名） |
-| `local_tailscale_ip` | 可选。运行 `local_novel_mcp.py`（WebUI 本地文件桥）那台主机的 Tailscale IP |
+| `local_tailscale_ip` | 可选。运行 `local_novel_mcp.py`（WebUI 本地文件桥）那台主机的 Tailscale IP。不填则生成的 Notebook 整个跳过本机文件桥（不起隧道线程，WebUI 里也没有 `local_novel_fs` 条目） |
 | `*_drive_id`（每个现役模型一项） | 可选。该模型 Notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab` 需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
+| `webui_system_prompt` | 可选。写进 WebUI 配置的默认系统提示，默认为空（不设） |
+| `notebooks_dir` | 可选。生成私有 Notebook 后额外镜像到的 Drive “Colab Notebooks”目录，默认不镜像 |
+| `novel_root` | 可选。`local_novel_mcp.py` 向 WebUI 暴露的本机目录，默认 `~/Documents/colab-novel`，支持 `~` |
+| `browsermcp_bridge` | 可选。BrowserMCP 桥脚本路径，后备轨道的第一档驱动；不设则直接用 Playwriter / playwright-cli |
 
-每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符。其他可调环境变量：
+示例文件里的 `<YOUR_...>` 是占位符，不是可用值；可选的后四项不在示例文件里，需要时手动加键。每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`、`WEBUI_SYSTEM_PROMPT`、`COLAB_NOTEBOOKS_DIR`、`NOVEL_ROOT`、`COLAB_BROWSERMCP_BRIDGE`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符（可选项则为空）。其他可调环境变量：
 
 | 环境变量 | 作用 |
 |---|---|
-| `COLAB_YOGA_DIR` | Colab-yoga 安装目录（默认 `%LOCALAPPDATA%\Programs\Colab-yoga`） |
-| `COLAB_NOTEBOOKS_DIR` | 生成 Notebook 后镜像到的 Drive “Colab Notebooks”目录；不设则自动探测各盘符下的 `My Drive`，探测不到就不镜像 |
+| `COLAB_YOGA_DIR` | Colab-yoga 安装目录（默认 `%LOCALAPPDATA%\Programs\Colab-yoga`）；`colab_cli.py yoga` 与 runners 导出都认它 |
 | `DRIVEFS_DB` | 指定 Drive 客户端元数据库路径 |
-| `NOVEL_ROOT` | `local_novel_mcp.py` 向 WebUI 暴露的本机目录 |
+| `PLAYWRITER_ENTRY` | Playwriter 的 `dist/index.js` 路径；默认是全局 npm 前缀下的位置 |
 | `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌（受限或限速模型需要） |
 | `COLAB_KEEPALIVE_BEAT` | 设为 `exec` 时心跳改回每拍起一次 `colab exec`（默认在守护进程内执行，失败自动回退） |
 
 ### 常用命令速查
 
 ```bash
-python scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
-python scripts/colab_cli.py launch [<slug>]       # 后台分离启动（读取 notebooks/ 里的私有构建，需先 colab_kernel.py <slug> 生成）
-python scripts/colab_cli.py verify [<slug>]       # 只重跑验证 cell
-python scripts/colab_cli.py status                # 余额、燃烧率、活动会话、心跳与闲置守卫
-python scripts/colab_cli.py stop [<slug> | --all] # 释放；残留无名 [?] 会话时自动回退 colab_sync --release-all
-python scripts/colab_cli.py yoga [gui | wake | status | stop]   # 可选：Colab-yoga 协同（旧名 easycolab 仍可用）
+python -X utf8 scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]   # 放后台运行
+python -X utf8 scripts/colab_cli.py launch [<slug>]       # 后台分离启动（读取 notebooks/ 里的私有构建，需先 colab_kernel.py <slug> 生成）
+python -X utf8 scripts/colab_cli.py verify [<slug>]       # 只重跑验证 cell
+python -X utf8 scripts/colab_cli.py status                # 余额、燃烧率、活动会话、心跳与闲置守卫
+python -X utf8 scripts/colab_cli.py stop [<slug> | --all] # 释放；残留无名 [?] 会话时先 Colab-yoga bridge，再 colab_sync
+python -X utf8 scripts/colab_cli.py yoga [gui | wake | status | stop]   # 可选：Colab-yoga 协同（旧名 easycolab 仍可用）
 
-python scripts/colab_kernel.py --list             # 现役与归档模型
-python scripts/colab_kernel.py --probe-hf <repo> [rev]   # 新模型 HF 预检
-python scripts/colab_meter.py status              # 后备轨道：云端账本 + 当前分配
-python scripts/colab_meter.py stop --all          # 后备轨道：强杀并打印双轨账单
+python -X utf8 scripts/colab_kernel.py --list             # 现役与归档模型
+python -X utf8 scripts/colab_kernel.py --probe-hf <repo> [rev]   # 新模型 HF 预检
+python -X utf8 scripts/colab_kernel.py --all [--mirror-drive]    # 生成全部现役 Notebook 并导出 Colab-yoga runners
+python -X utf8 scripts/colab_meter.py status              # 后备轨道：云端账本 + 当前分配
+python -X utf8 scripts/colab_meter.py stop --all          # 后备轨道：强杀并打印双轨账单
 
 cd scripts && python -X utf8 -m unittest discover -p "test_*.py"   # 全部单元测试
 ```
 
-后备轨道（浏览器同步）：`python scripts/make_g4_huihui_v2_notebook.py --sync-colab --run-cell1`，再 `python scripts/colab_meter.py stop --all` 释放并结算。
+后备轨道（浏览器同步）：`python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sync-colab --run-cell1`，再 `python -X utf8 scripts/colab_meter.py stop --all` 释放并结算。
 
-### 可选：Colab-yoga 托盘工作台
+### 可选：Colab-yoga 托盘管理台
 
-[Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 是配套的 Windows 托盘管理台，安装目录为 `%LOCALAPPDATA%\Programs\Colab-yoga`（`Colab-yoga.exe`、`runtime\python.exe`、`bridge\colab_yoga_bridge.py`）。`colab_kernel.py` 生成 Notebook 时会把各现役模型的无头首格导出到其目录下的 `colab_kernel_runners.json`（目录不存在则跳过并提示）；`colab_cli.py yoga ...` 找不到安装时会报出安装位置，也可用 `COLAB_YOGA_DIR` 指向自定义目录。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都会经 `~/.config/colab-cli/sessions.json` 复用同一台 G4。
+[Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 是配套的 Windows 托盘 GPU 管理台，只管 LLM 服务（llama-server :8081、Web UI、Magpie、MCP 文件桥），不含视频/生图/ComfyUI；对话流量不经过它。它管的是 GPU：花了多少 CU、当前跑哪个模型、各入口是否通，以及运行时只在被使用期间保活。唤醒时它不会杀 `:8081` 的 `llama-server` 和 MCP 转发器，只替换自己旧的 server 进程。安装目录为 `%LOCALAPPDATA%\Programs\Colab-yoga`（`Colab-yoga.exe`、`runtime\python.exe`、`bridge\colab_yoga_bridge.py`）。
+
+分工：起模型、换模型用本仓库的 `colab_cli.py start`；托盘 Colab-yoga 负责查看、续时、切换和释放。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都会经 `~/.config/colab-cli/sessions.json` 复用同一台 G4。
+
+**让 Colab-yoga 认得本仓库的模型（runners，固定三步）：**
+
+1. 把 Colab-yoga 装到 `%LOCALAPPDATA%\Programs\Colab-yoga`；或解压到别处，并把环境变量 `COLAB_YOGA_DIR` 设成那个目录（设完重开终端）。
+2. 运行 `python -X utf8 scripts/colab_kernel.py --all`，输出里必须有一行 `Exported Colab-yoga runners to: <路径>`；出现 `skipped exporting runners` 说明目录不对。
+3. 改了 `.secrets.json`（密钥、tailnet、文件桥 IP、系统提示）后重跑第 2 步，runners 里的值是生成时写死的。`colab_kernel_runners.json` 含真实密钥，不要提交。
+
+`colab_cli.py yoga ...` 找不到安装时会报出安装位置，也可用 `COLAB_YOGA_DIR` 指向自定义目录。
 
 ### 故障排查
 
 | 现象 | 处理 |
 |---|---|
-| `missing ... in .secrets.json / environment` | 必填四项仍是占位符，回到上表填写 |
-| `colab` 找不到，或要求授权 | `uv tool install "google-colab-cli==0.7.5"`，再运行一次 `colab sessions` |
+| `missing ... in .secrets.json / environment` | 必填四项为空，或还是示例文件里的 `<YOUR_...>` 占位符，回到上表填写；这个检查在分配 GPU 之前 |
+| `colab` 不是内部或外部命令 | uv 的工具目录不在 PATH：`uv tool update-shell`，**关闭并重开终端**；仍找不到用 `uv tool dir --bin` 看目录并手动加进 PATH |
+| `colab sessions` / `colab usage` 卡住，或要求授权 | 没授权或令牌失效，它在等 `input()` 粘贴授权码。让本人在自己的终端跑 `colab sessions`，或走 Colab-yoga bridge 的 `auth_url` / `auth_code` 两步；agent 不要在无交互 stdin 下重试 |
+| `UnicodeEncodeError` | 控制台编码不是 UTF-8：统一用 `python -X utf8 scripts/...`（入口也已强制 UTF-8）；`start` 分配之后遇到任何异常都会释放本次创建的实例，仍请 `status` 核验 |
 | `Colab-yoga not found at ...` | 可选组件未安装：按提示装 Colab-yoga，或设 `COLAB_YOGA_DIR`；不影响核心命令 |
+| `skipped exporting runners` | Colab-yoga 目录不存在或不是 `COLAB_YOGA_DIR` 指的那个；按上面“runners 固定三步”重做，直到出现 `Exported Colab-yoga runners to:` |
 | `Backend rejected accelerator` | G4 只有单一规格，`--high-mem` 会被拒（脚本已跳过）；也可能是账号无 G4 额度或当日无空闲卡 |
 | 实例 20～35 分钟后消失 | 心跳进程没在跑（电脑休眠或被杀）；`status` 查看，`start`/`launch` 才会拉起保活 |
-| `stop --all` 后仍有 active 或 `[?]` | `python scripts/colab_sync.py --release-all`（需已登录 Google 的 Edge 标签页），再用 `colab_meter.py status` 核验 |
-| 域名超时 | Service 审批刚生效需几秒到十几秒，重试；确认 Tailscale ≥ 1.78 且 ACL 含 `autoApprovers.services` |
+| `stop --all` 后仍有 active 或 `[?]` | 依次：① Colab-yoga bridge `stop_all`（`stop --all` 已自动试，手动：`runtime\python.exe -u bridge\colab_yoga_bridge.py stop_all`）；② Colab 网页“代码执行程序 → 管理会话”手动终止；③ 浏览器驱动 `python -X utf8 scripts/colab_sync.py --release-all`（需先装 Playwriter 等，见后备轨道一节）。最后用 `status` 核验 |
+| 域名超时 | Service 审批刚生效需几秒到十几秒，重试；确认 Tailscale ≥ 1.78、DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services` |
 
 更完整的排障与模型接入流程见 [`SKILL.md`](SKILL.md) 第 7 节。
 
@@ -228,7 +265,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"   # 全部单�
 ### 生成脱敏构建
 
 ```bash
-python scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir dist/
+python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir dist/
 ```
 
 `--sanitized` 会将所有敏感字段替换为占位符，并忽略本地 `.secrets.json` 与环境变量；同时它禁止与 `--sync-colab` 混用，防止误把占位符 Notebook 推送到 Colab。
@@ -251,12 +288,13 @@ python scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir dist/
 | `scripts/colab_meter.py` | 后备轨道：零 OAuth status / start / stop CLI 与双轨 CU 账单 |
 | `scripts/colab_pw.mjs` | Playwriter 后备后端（支持 __ANY__ 标签页复用模式） |
 | `scripts/local_novel_mcp.py` | 桥接进 Colab WebUI 的本地 Windows 目录 MCP 服务 |
-| `scripts/secrets_config.py` | .secrets.json / 环境变量 / 占位符加载器 |
+| `scripts/secrets_config.py` | .secrets.json / 环境变量 / 占位符加载器；示例占位符一律视为“未填写” |
+| `scripts/stdio_utf8.py` | 把 stdout/stderr 强制成 UTF-8，各入口脚本共用 |
 | `scripts/parallel_download.py` | 多进程并发下载器参考实现 |
 | `scripts/webui_console.py` | 首单元格控制台与停止按钮 |
 | `scripts/stop-runtime.py` | 运行时释放辅助脚本 |
 | `scripts/update-pi-provider.ps1` | 将服务端点注册进本地 pi provider 列表 |
-| `scripts/test_*.py` | 单元测试：保活与 CLI、内核与启动指纹、Colab-yoga 对接、本地 MCP、计费、基准 |
+| `scripts/test_*.py` | 单元测试：保活与 CLI、内核与启动指纹、Colab-yoga 对接、首次运行安全（占位符、失败释放、可选项）、本地 MCP、计费、基准 |
 | `references/` | 各模型说明、CU 预算核算、Tailscale 与远程接入指南 |
 | `archive/multi-model-kernel/` | 已归档冻结的多模型内核、生成器与说明（122B、Nemotron、Gemma） |
 | `debug-runs/` | 2026-11-07 T4 对照/心跳 A/B 实验与 G4 长稳测试日志 |
@@ -266,7 +304,8 @@ python scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir dist/
 ## 安全说明
 
 - `.secrets.json` 与 `.colab-meter-state.json` 已列入 `.gitignore`；首次推送前请用 `git status` 确认未被暂存。
-- 本地生成的非脱敏 Notebook 内嵌了模型 API Key 与 Tailscale OAuth 密钥（供运行时读取），切勿提交或分享未加 `--sanitized` 生成的 Notebook。
+- 本地生成的非脱敏 Notebook 内嵌了模型 API Key 与 Tailscale OAuth 密钥（供运行时读取），切勿提交或分享未加 `--sanitized` 生成的 Notebook。它默认只写进本仓库的 `notebooks/`；镜像到 Google Drive 须显式开启（`.secrets.json` 的 `notebooks_dir`、环境变量 `COLAB_NOTEBOOKS_DIR` 或命令行 `--mirror-drive`），镜像出去的副本同样含密钥，要按密钥对待。每次私有构建后跑 `git status`。
+- `colab_kernel_runners.json`（导出给 Colab-yoga 的无头首格）同样含真实密钥，不要提交或分享。
 - Tailscale OAuth 客户端权限应严格限制为仅签发带 `tag:colab` 的认证密钥；若非脱敏 Notebook 曾离开本机，请立即轮换密钥。
 - 仅限 Tailnet 内部访问的服务依赖 WireGuard 身份完成隔离；若对公网暴露，必须额外启用应用层 API Key。
 

@@ -23,6 +23,17 @@ Colab 的可用 GPU、每小时 CU 消耗和套餐额度会变化。估算前先
 200 CU 约可用 35 次一小时会话
 ```
 
+## 本仓库的 G4 费率（向用户确认花钱时要报的数）
+
+G4（RTX PRO 6000 96GB）实测约 **10 CU/小时**：`debug-runs/2026-11-07-start.log` 与 `debug-runs/2026-11-07-g4-kernel-beat-start.log` 的 `start OK` 行都是 `rate 10.05 CU/h`。冷启动实测 111～140 秒（同两份日志的 `start OK in 111s` / `140s`，模型 `qwen38-fn`），换更大或更慢下载的权重会更久，这段同样计费。
+
+```text
+用 1 小时   ≈ 10 + 启动 (2～15 分钟 × 10/60 ≈ 0.3～2.5) ≈ 10～13 CU
+用 2 小时   ≈ 20～23 CU
+```
+
+费率会变，开机前先 `python -X utf8 scripts/colab_cli.py status` 取当日实时值与余额，以 Colab 页面为准。确认时一并说明：没人用就停，保活进程 45 分钟无推理流量会自动 `colab stop`。
+
 ## 重要区别
 
 - CU 按运行时被分配的时间扣，空闲也算。
@@ -41,7 +52,7 @@ Colab 的可用 GPU、每小时 CU 消耗和套餐额度会变化。估算前先
 | `GET /tun/m/assignments?authuser=0` | 活跃会话 | `assignments[]`：`endpoint`、`accelerator`、`variant`、`machineShape` |
 | `GET/POST /tun/m/unassign/<endpoint>?authuser=0` | 强杀 | GET 返回 `token`；POST 带头 `X-Goog-Colab-Token: <token>` |
 
-`python scripts/colab_meter.py status` 一行给出 `Active assignments: N | Burn rate: X.XX CU/h | Balance: YYY.YY CU | Eligible GPUs: ...`。本机 2026-11-04 实测：`0 active / 0.00 CU/h / 988.85 CU`，可用 GPU `H100, G4, A100, L4, T4`。
+`python -X utf8 scripts/colab_meter.py status` 一行给出 `Active assignments: N | Burn rate: X.XX CU/h | Balance: YYY.YY CU | Eligible GPUs: ...`。示意输出：`0 active / 0.00 CU/h / <你的余额> CU`，可用 GPU 取决于账号（例如 `H100, G4, A100, L4, T4`）。
 
 ## 双轨对账
 
@@ -54,4 +65,4 @@ Colab 的可用 GPU、每小时 CU 消耗和套餐额度会变化。估算前先
 
 ## 幽灵实例强杀
 
-关掉笔记本页面或浏览器崩溃，不会释放运行时，`consumptionRateHourly` 仍大于 0。`python scripts/colab_meter.py stop --all`（或 `python scripts/colab_sync.py --release-all`）对每个 `endpoint` 做 GET 取 token、POST 释放两步握手，等 1.5 s 重查，最多 3 次，直到 `assignmentsCount == 0` 且 `consumptionRateHourly == 0`。结束凭据是这个查询结果，不是命令返回码。
+关掉笔记本页面或浏览器崩溃，不会释放运行时，`consumptionRateHourly` 仍大于 0。`python -X utf8 scripts/colab_meter.py stop --all`（或 `python -X utf8 scripts/colab_sync.py --release-all`）对每个 `endpoint` 做 GET 取 token、POST 释放两步握手，等 1.5 s 重查，最多 3 次，直到 `assignmentsCount == 0` 且 `consumptionRateHourly == 0`。结束凭据是这个查询结果，不是命令返回码。

@@ -1,6 +1,6 @@
 """Zero-overhead local MCP server (Streamable HTTP) for llama-server WebUI novel writing.
 
-Exposes ~/Documents/Colab创作 (or $NOVEL_ROOT) to the WebUI at http://qwen.<tailnet>.ts.net:443/ directly from the
+Exposes the novel root directory to the WebUI at http://qwen.<tailnet>.ts.net:443/ directly from the
 local Edge browser via http://127.0.0.1:3426/mcp (useProxy: false), with CORS + Chromium Private
 Network Access headers so the browser connects directly to localhost without going through Colab.
 """
@@ -19,9 +19,20 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from secrets_config import optional_setting  # noqa: E402
+
 HOST = '0.0.0.0'
 PORT = 3426
-NOVEL_ROOT = Path(os.environ.get('NOVEL_ROOT') or (Path.home() / 'Documents/Colab创作')).resolve()
+
+
+def _novel_root() -> Path:
+    """$NOVEL_ROOT, else "novel_root" in .secrets.json, else ~/Documents/colab-novel."""
+    configured = os.environ.get('NOVEL_ROOT') or optional_setting('novel_root')
+    return Path(configured).expanduser().resolve() if configured else (Path.home() / 'Documents/colab-novel').resolve()
+
+
+NOVEL_ROOT = _novel_root()
 SKILL_MAP = {
     'skill:grilling': Path.home() / '.agents/upstream/mattpocock-skills/skills/productivity/grilling/SKILL.md',
     'skill:prompting': Path.home() / '.agents/skills/universal-model-prompting/SKILL.md',
@@ -290,7 +301,7 @@ TOOLS = [
     {
         'name': 'list_novel_files',
         'title': '列出本机小说目录与文件',
-        'description': '列出 ~/Documents/Colab创作 下的书籍子目录与 .md 文件（含行数和字节大小）。',
+        'description': '列出小说根目录下的书籍子目录与 .md 文件（含行数和字节大小）。',
         'inputSchema': {
             'type': 'object',
             'properties': {
@@ -1376,7 +1387,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                     'protocolVersion': proto,
                     'capabilities': {'tools': {'listChanged': False}},
                     'serverInfo': {'name': 'local_novel_fs', 'version': '1.0.0'},
-                    'instructions': '本机小说目录 (~/Documents/Colab创作) 读写与原作检索工具。',
+                    'instructions': '本机小说目录读写与原作检索工具。',
                 },
             }
 

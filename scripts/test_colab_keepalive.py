@@ -505,7 +505,7 @@ class LaunchDetachTests(unittest.TestCase):
         self.assertIn('threading.Thread(target=_bg_finish, daemon=True).start()', cell)
 
     def test_launch_health_url_is_raw_tcp_service(self):
-        src = inspect.getsource(colab_cli.cmd_launch)
+        src = inspect.getsource(colab_cli._cmd_launch)
         self.assertIn("'http://%s:443/health'", src)
         self.assertNotIn('https://%s/health', src)
 

@@ -6,7 +6,7 @@
 |---|---|
 | slug / 生成脚本 | `qwen38-huihui-v2` / [`scripts/make_g4_huihui_v2_notebook.py`](../scripts/make_g4_huihui_v2_notebook.py) |
 | 笔记本 | [`notebooks/qwen3.8-flash-next-huihui-v2-g4-colab.ipynb`](../notebooks/qwen3.8-flash-next-huihui-v2-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `g4huihui_drive_id`） |
-| CLI 启动 | `python scripts/colab_cli.py start qwen38-huihui-v2`（或 `launch`） |
+| CLI 启动 | `python -X utf8 scripts/colab_cli.py start qwen38-huihui-v2`（或 `launch`） |
 | Magpie 模型 ID | `qwen-colab/Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL` |
 | 主权重 | `huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF` @ `cbc7fba13f1939ac3fa42b18d77ccf43847d74ef`，`unsloth-UD-Q4_K_XL-V2/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{1..4}-of-00004.gguf`，共 111.33 GB（103.69 GiB） |
 | 视觉头 | 同仓 `mmproj-Qwen3.8-Flash-Next-BF16.gguf`（`907_543_008` B，sha256 `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0`） |

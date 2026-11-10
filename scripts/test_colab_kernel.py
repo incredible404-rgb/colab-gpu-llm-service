@@ -165,7 +165,8 @@ class MagpieSyncTests(unittest.TestCase):
                 out = ''
             return subprocess.CompletedProcess(argv, 0, stdout=out)
 
-        with mock.patch.object(ck.subprocess, 'run', side_effect=fake_run):
+        with mock.patch.object(ck, '_magpie_launcher', return_value=('bash', '-lc')), \
+                mock.patch.object(ck.subprocess, 'run', side_effect=fake_run):
             ck.sync_magpie_models()
         replace = next(c for c in calls if 'provider models qwen-colab' in c).split()
         self.assertIn('Old-Model', replace)

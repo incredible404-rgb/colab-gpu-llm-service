@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import colab_sync  # noqa: E402
+from stdio_utf8 import force_utf8  # noqa: E402
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATE_FILE = ROOT_DIR / '.colab-meter-state.json'
@@ -248,6 +249,7 @@ def cmd_stop(args):
 
 
 def main(argv=None):
+    force_utf8()
     ap = argparse.ArgumentParser(description='Colab CU meter (zero OAuth, /tun/m)')
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('status', help='balance, burn rate and active assignments')

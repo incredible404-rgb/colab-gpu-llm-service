@@ -1,4 +1,4 @@
-"""Push generated notebook cells into a Colab tab of the signed-in Edge (BrowserMCP, then Playwriter, then playwright-cli -s=edge).
+"""Push generated notebook cells into a Colab tab of the signed-in Edge (optional BrowserMCP bridge, then Playwriter, then playwright-cli -s=edge).
 
 Shared by make_*_notebook.py --sync-colab. The Colab tab is chosen by Drive file id: a tab on any other
 notebook is never touched. Cells are matched by type, surplus cells are deleted, texts are set and read back,
@@ -11,6 +11,12 @@ colab_status() reads balance / burn rate / assignments, colab_unassign() kills a
 GET token + POST handshake and re-checks until 0 active / 0.00 CU/h. Those calls use drive id "__ANY__": any
 open Colab tab is reused untouched, otherwise a temporary tab is opened and closed again.
 Standalone: python scripts/colab_sync.py --status | --release-all
+
+Browser drivers are all optional and none ships with this repo: Playwriter (`npm install -g playwriter` plus its
+browser extension), `@playwright/cli` (`npm install -g @playwright/cli`, session "edge"), or a BrowserMCP bridge
+script whose path you give in COLAB_BROWSERMCP_BRIDGE or the "browsermcp_bridge" key of .secrets.json.
+Without a signed-in browser, release stuck instances with the Colab-yoga bridge `stop_all` or the Colab web
+page (Runtime > Manage sessions) instead.
 """
 import base64
 import hashlib
@@ -24,10 +30,16 @@ import time
 import zlib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from secrets_config import optional_setting  # noqa: E402
+from stdio_utf8 import force_utf8  # noqa: E402
+
 CLI_JS = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'npm/node_modules/@playwright/cli/playwright-cli.js'
 CLI_TIMEOUT = 120  # the bridge hangs forever when it drops, so every call needs an upper bound
 PW_HELPER = Path(__file__).with_name('colab_pw.mjs')
-BMCP_BRIDGE = Path.home() / '.config/magpie/library/skills/live-browser/scripts/browsermcp-bridge.mjs'
+# Optional first tier. Nothing is assumed about where (or whether) a BrowserMCP bridge script lives.
+_bmcp_setting = optional_setting('browsermcp_bridge', 'COLAB_BROWSERMCP_BRIDGE')
+BMCP_BRIDGE = Path(_bmcp_setting).expanduser() if _bmcp_setting else None
 _target = {}
 # Tier in use: None/'browsermcp' -> 'playwriter' -> 'bridge' (playwright-cli). A tier that fails once is skipped
 # for the rest of the process.
@@ -177,8 +189,8 @@ try {
 
 def _bmcp_eval(js, timeout=CLI_TIMEOUT, target=None):
     target = target or _target
-    if not BMCP_BRIDGE.exists():
-        raise _BackendUnavailable('browsermcp-bridge.mjs not found')
+    if BMCP_BRIDGE is None or not BMCP_BRIDGE.exists():
+        raise _BackendUnavailable('BrowserMCP bridge not configured (COLAB_BROWSERMCP_BRIDGE)')
     fd, page_path = tempfile.mkstemp(prefix='colab-bmcp-', suffix='.js')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8', newline='') as f:
@@ -206,11 +218,11 @@ def _bmcp_eval(js, timeout=CLI_TIMEOUT, target=None):
 
 
 def _tiered(js, target):
-    """Try BrowserMCP, then Playwriter. Returns (True, result) or (False, None) once both are out."""
+    """Try BrowserMCP (when configured), then Playwriter. Returns (True, result) or (False, None) once both are out."""
     global _backend
-    tiers = [('browsermcp', _bmcp_eval), ('playwriter', _pw_eval)]
+    tiers = ([('browsermcp', _bmcp_eval)] if BMCP_BRIDGE else []) + [('playwriter', _pw_eval)]
     if _backend == 'playwriter':
-        tiers = tiers[1:]
+        tiers = [t for t in tiers if t[0] == 'playwriter']
     elif _backend == 'bridge':
         tiers = []
     for name, fn in tiers:
@@ -463,6 +475,7 @@ def sync_requested(nb, drive_id, label=None):
 
 def main(argv=None):
     import argparse
+    force_utf8()
     ap = argparse.ArgumentParser(description='Colab account tools (zero OAuth, via /tun/m in a signed-in tab)')
     ap.add_argument('--status', action='store_true', help='print balance, burn rate and active assignments')
     ap.add_argument('--release-all', action='store_true', help='kill every active assignment and print the CU bill')

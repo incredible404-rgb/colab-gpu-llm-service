@@ -6,7 +6,7 @@
 |---|---|
 | slug / 生成脚本 | `glm53-flash` / [`scripts/make_glm53_flash_notebook.py`](../scripts/make_glm53_flash_notebook.py) |
 | 笔记本 | [`notebooks/glm5.3-flash-abliterated-g4-colab.ipynb`](../notebooks/glm5.3-flash-abliterated-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `glm53_drive_id`） |
-| CLI 启动 | `python scripts/colab_cli.py start glm53-flash`（或 `launch glm53-flash`） |
+| CLI 启动 | `python -X utf8 scripts/colab_cli.py start glm53-flash`（或 `launch glm53-flash`） |
 | Magpie 模型 ID | `qwen-colab/GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4` |
 
 ## 权重与组件

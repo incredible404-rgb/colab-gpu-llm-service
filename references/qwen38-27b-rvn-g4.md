@@ -6,7 +6,7 @@
 |---|---|
 | slug / 生成脚本 | `qwen38-27b-rvn` / [`scripts/make_27b_rvn_notebook.py`](../scripts/make_27b_rvn_notebook.py) |
 | 笔记本 | [`notebooks/qwen3.8-27b-rvn-g4-colab.ipynb`](../notebooks/qwen3.8-27b-rvn-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `rvn27b_drive_id`） |
-| CLI 启动 | `python scripts/colab_cli.py start qwen38-27b-rvn`（或 `launch qwen38-27b-rvn`） |
+| CLI 启动 | `python -X utf8 scripts/colab_cli.py start qwen38-27b-rvn`（或 `launch qwen38-27b-rvn`） |
 | Magpie 模型 ID | `qwen-colab/Qwen3.8-27B-RVN-Heretic-BF16` |
 
 ## 权重与组件

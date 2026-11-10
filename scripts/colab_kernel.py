@@ -11,20 +11,26 @@ are frozen in archive/multi-model-kernel/; their last generated notebooks stay i
   once llama-server is spawned and that same daemon thread waits for /health before warmup),
   per-model-card sampling, post-load release of GPU-only tmpfs copies into a larger prompt cache,
   in-runtime hot switch between the registered quants, 7-cell layout, and 45-min idle guard.
-- Auto-distribution: generates notebooks/<name>.ipynb, mirrors to the local Google Drive 'Colab Notebooks' folder (COLAB_NOTEBOOKS_DIR),
-  auto-resolves new Google Drive cloud_id from DriveFS SQLite DB into .secrets.json, AST-validates
-  all code cells, and syncs to Colab Web (--sync-colab) and Magpie (--sync-magpie, additive).
+- Auto-distribution: generates notebooks/<name>.ipynb, auto-resolves new Google Drive cloud_id from DriveFS SQLite DB
+  into .secrets.json, AST-validates all code cells, and syncs to Colab Web (--sync-colab) and Magpie (--sync-magpie,
+  additive). A private build carries real keys, so it is mirrored to a Drive folder only on request:
+  `notebooks_dir` in .secrets.json, COLAB_NOTEBOOKS_DIR, or --mirror-drive (probe for a local My Drive).
+- Colab-yoga: unless --sanitized, also exports the headless cell-1 runners to <Colab-yoga install>/colab_kernel_runners.json
+  (COLAB_YOGA_DIR overrides the install dir; a missing dir is reported and skipped). Re-run after editing .secrets.json.
 
 Usage:
-  python scripts/colab_kernel.py --all [--sync-colab] [--sync-magpie]
-  python scripts/colab_kernel.py <slug> [--sanitized] [--output-dir DIR] [--sync-colab]
+  python -X utf8 scripts/colab_kernel.py --all [--sync-colab] [--sync-magpie] [--mirror-drive]
+  python -X utf8 scripts/colab_kernel.py <slug> [--sanitized] [--output-dir DIR] [--sync-colab]
 """
 from __future__ import annotations
 
 import ast
 import hashlib
+import ipaddress
 import json
 import os
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -34,21 +40,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from archived_models import ARCHIVED_MODELS
 from colab_sync import sync_requested
-from secrets_config import FIELDS, SECRETS_FILE, guard_sync, load_config, report
+from secrets_config import FIELDS, SECRETS_FILE, guard_sync, is_placeholder, load_config, report
+from stdio_utf8 import force_utf8
 from webui_console import console_code
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-def _drive_notebooks_dir() -> Path | None:
-    """Local 'Colab Notebooks' folder of Google Drive for desktop; generated notebooks are mirrored there.
-
-    COLAB_NOTEBOOKS_DIR overrides. Otherwise every drive letter D..Z is probed for a My Drive root (English
-    name or its zh-CN localization). None when Drive for desktop is not mounted: the mirror is optional.
-    """
-    env = os.environ.get('COLAB_NOTEBOOKS_DIR')
-    if env:
-        return Path(env)
+def _probe_my_drive_notebooks() -> Path | None:
+    """The local 'Colab Notebooks' folder of Google Drive for desktop, found by probing drive letters D..Z for a
+    My Drive root (English name or its zh-CN localization). None when Drive for desktop is not mounted."""
     roots = ('My Drive', '\u6211\u7684\u4e91\u7aef\u786c\u76d8')  # zh-CN Drive localizes "My Drive"
     for letter in 'DEFGHIJKLMNOPQRSTUVWXYZ':
         for root in roots:
@@ -58,7 +59,21 @@ def _drive_notebooks_dir() -> Path | None:
     return None
 
 
-DRIVE_NB_DIR = _drive_notebooks_dir()
+def drive_mirror_dir(config: dict, argv: list[str]) -> Path | None:
+    """Where a private build is mirrored, or None (the default).
+
+    A generated notebook embeds the real API key and Tailscale secret, so copying it into Google Drive is an
+    explicit choice: `notebooks_dir` in .secrets.json / COLAB_NOTEBOOKS_DIR names the folder, or --mirror-drive
+    probes for the local My Drive.
+    """
+    explicit = (config.get('notebooks_dir') or '').strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    if '--mirror-drive' in argv:
+        return _probe_my_drive_notebooks()
+    return None
+
+
 LOCAL_MCP_PORT = 3426
 
 
@@ -306,13 +321,19 @@ ALL_MODELS: dict[str, dict] = {**ARCHIVED_MODELS, **MODELS}
 # 只在生成端用、不写进首格 SPEC 的登记项。
 _GEN_ONLY_KEYS = ('notebook', 'drive_key', 'env_key', 'placeholder', 'title', 'banner')
 
-WEBUI_SYSTEM_PROMPT = (
-    '你是中文长篇小说共创搭档。\n'
-    '1. 开了 local_novel_fs 时，动笔前先读 写作要求.md 和正文末尾（tail_lines=150）。新章或下半章用 write_novel_file 追加；重写上一轮用 replace_last_write，重写整章用 replace_last_chapter；小改用 edit_novel_file；撤回用 undo_novel_write。没开工具就直接在对话里写。\n'
-    '2. 查原作用 grep_reference；设定冲突以用户当前指令为准。\n'
-    '3. 用户说「收工」时，用 edit_novel_file 把新定的设定、进度和伏笔更新进 写作要求.md，只改变化项。\n'
-    '4. 用户点名时才读技能：grill/拷问 读 skill:grilling，优化提示词 读 skill:prompting，retro/复盘 读 skill:retro。'
-)
+def bridge_ip(config: dict) -> str:
+    """Tailscale IP of the machine running local_novel_mcp.py, or '' when no file bridge is configured.
+
+    An unset value, a <YOUR_...> placeholder or anything that is not an IPv4 address disables the bridge in
+    the generated notebook instead of leaving a broken tunnel thread behind.
+    """
+    value = (config.get('local_tailscale_ip') or '').strip()
+    if is_placeholder(value):
+        return ''
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        return ''
 
 
 def _lines(text: str) -> list[str]:
@@ -351,7 +372,7 @@ def _ensure_drive_id(spec: dict, config: dict, sanitized: bool) -> str:
             if SECRETS_FILE.exists():
                 sec = json.loads(SECRETS_FILE.read_text(encoding='utf-8'))
                 sec[key] = cloud_id
-                SECRETS_FILE.write_text(json.dumps(sec, indent=2) + '\n', encoding='utf-8', newline='')
+                SECRETS_FILE.write_text(json.dumps(sec, indent=2, ensure_ascii=False) + '\n', encoding='utf-8', newline='')
             config[key] = cloud_id
             return cloud_id
         time.sleep(1)
@@ -466,10 +487,15 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     api_key = config['api_key']
     ts_id = config['ts_client_id']
     ts_secret = config['ts_client_secret']
+    mcp_ip = bridge_ip(config)
+    system_prompt = (config.get('webui_system_prompt') or '').strip()
     alias = spec['alias']
     slug = spec['slug']
     root_dir = spec['root_dir']
 
+    files_note = '与本机文件直通' if mcp_ip else ''
+    prompt_note = '自动加载配置的 System Prompt、' if system_prompt else ''
+    bridge_note = '，并通过 Tailscale SOCKS5 隧道直连本机文件目录（`local_novel_fs` 工具可在 WebUI 输入框一键开关）' if mcp_ip else ''
     overview_md = f"""# {spec['title']}
 
 - **模型别名**：`{alias}`（262,144 上下文 / 65,536 最大输出 / 16–64 GiB Prompt Cache + 槽位持久化）
@@ -477,7 +503,7 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
 - **启动**：首格 `DEBUG_VERIFY = False`（调试新模型/改配置时设 True）。生产模式在 `/health` 返回 200 后立刻出就绪横幅；CUDA 预热、内存盘副本释放和 Tailscale 收尾放到后台。调试模式才做 /props 四档门禁、阻塞预热和额外大小核对。不跑拼写探针，也不做 SHA-256。
 - **热切换**：“热切换模型”格不释放 G4 就换跑另一个已登记模型，省掉重新分配运行时和装 llama.cpp / Tailscale 的时间。
 - **采样参数**：`--temp {spec['temp']} --top-p {spec['top_p']} --top-k {spec['top_k']} --min-p {spec['min_p']}`（按模型卡官方默认值）
-- **WebUI 持久化与本机文件直通**：服务端内置 `--ui-config-file` 与 `--ui-mcp-proxy`，自动加载小说共创 System Prompt、关闭后台 LLM 标题生成防缓存冲刷，并通过 Tailscale SOCKS5 隧道直连本机 `~/Documents/Colab创作`（`local_novel_fs` 工具可在 WebUI 输入框一键开关）。
+- **WebUI 持久化{files_note}**：服务端内置 `--ui-config-file` 与 `--ui-mcp-proxy`，{prompt_note}关闭后台 LLM 标题生成防缓存冲刷{bridge_note}。
 - **固定入口（所有笔记本分时复用 `svc:qwen`）**：
   - 网页：`http://{fqdn}:443/`（首格就绪自动弹出，点首格停机按钮自动关闭）
   - 接口：`http://{fqdn}:443/v1`
@@ -492,8 +518,6 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     # 这里不把采样数值写进 ui 配置，只由 CLI 决定；浏览器里存过采样覆盖或旧系统提示时，
     # 要在 WebUI 点 Reset to Default，或清掉该站点的 llama.cpp 配置 localStorage，否则请求体仍会覆盖 CLI。
     ui_cfg_dict = {
-        'systemMessage': WEBUI_SYSTEM_PROMPT,
-        'showSystemMessage': True,
         'showMessageStats': True,
         'enableContinueGeneration': True,
         'pasteLongTextToFileLen': 50000,
@@ -502,20 +526,23 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
         'renderUserContentAsMarkdown': True,
         'titleGenerationUseLLM': False,
         'titleGenerationUseFirstLine': True,
-        'mcpServers': json.dumps(
+    }
+    if system_prompt:
+        ui_cfg_dict = {'systemMessage': system_prompt, 'showSystemMessage': True, **ui_cfg_dict}
+    if mcp_ip:  # no file bridge configured = no WebUI tool entry that could only fail to connect
+        ui_cfg_dict['mcpServers'] = json.dumps(
             [
                 {
                     'id': 'local-novel-fs',
                     'name': 'local_novel_fs',
-                    'displayName': '本机小说目录 (Colab创作)',
+                    'displayName': '本机文件目录 (local_novel_fs)',
                     'url': f'http://127.0.0.1:{LOCAL_MCP_PORT}/mcp',
                     'enabled': True,
                     'useProxy': True,
                 }
             ],
             ensure_ascii=False,
-        ),
-    }
+        )
 
     runtime_spec = {k: v for k, v in json.loads(json.dumps(spec)).items() if k not in _GEN_ONLY_KEYS}
     for item in runtime_spec['files']:
@@ -541,6 +568,7 @@ MODEL_ALIAS = SPEC['alias']
 KEY_FILE = ROOT / '.llama-api-key'
 PORT = 8081
 KEY = {json.dumps(api_key)}
+LOCAL_MCP_IP = {json.dumps(mcp_ip)}  # Tailscale IP of the PC running local_novel_mcp.py; '' = no file bridge
 FILES = SPEC['files']
 CPP_TAG = 'b12032'
 CPP_URL = 'https://github.com/ggml-org/llama.cpp/releases/download/' + CPP_TAG
@@ -721,7 +749,7 @@ def _start_mcp_bridge():
             up = socket.create_connection(('127.0.0.1', 1055), timeout=10)
             up.sendall(bytes([5, 1, 0]))
             assert up.recv(2) == bytes([5, 0])
-            up.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton({json.dumps(config['local_tailscale_ip'])}) + struct.pack('>H', {LOCAL_MCP_PORT}))
+            up.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton(LOCAL_MCP_IP) + struct.pack('>H', {LOCAL_MCP_PORT}))
             assert up.recv(10)[1] == 0
             threading.Thread(target=_pipe, args=(cli, up), daemon=True).start()
             threading.Thread(target=_pipe, args=(up, cli), daemon=True).start()
@@ -771,8 +799,9 @@ def prepare_tailscale():
     ts('serve', 'reset')
     ts('serve', '--bg', '--service=' + SERVICE, '--tcp=443', 'tcp://127.0.0.1:%d' % PORT, timeout=90)
     ts('serve', '--bg', '--https=443', 'http://127.0.0.1:%d' % PORT, timeout=90)
-    threading.Thread(target=_start_mcp_bridge, daemon=True).start()
-    print(f'[并行任务] Tailscale Service ({{SERVICE_FQDN}}) 与本机小说文件 MCP 隧道已就绪', flush=True)
+    if LOCAL_MCP_IP:
+        threading.Thread(target=_start_mcp_bridge, daemon=True).start()
+    print(f'[并行任务] Tailscale Service ({{SERVICE_FQDN}}) ' + ('与本机文件 MCP 隧道' if LOCAL_MCP_IP else '（未配置本机文件桥）') + '已就绪', flush=True)
 
 bg_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 fut_cpp = bg_executor.submit(prepare_llama_cpp)
@@ -1786,8 +1815,9 @@ def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
     nb_path.write_text(nb_json, encoding='utf-8', newline='')
     print('Generated:', nb_path)
 
-    if not sanitized and '--sync-colab' not in argv and output_dir == ROOT_DIR / 'notebooks' and DRIVE_NB_DIR and DRIVE_NB_DIR.exists():
-        drive_nb = DRIVE_NB_DIR / spec['notebook']
+    mirror_dir = None if sanitized else drive_mirror_dir(config, argv)
+    if mirror_dir and '--sync-colab' not in argv and output_dir == ROOT_DIR / 'notebooks' and mirror_dir.exists():
+        drive_nb = mirror_dir / spec['notebook']
         drive_nb.write_text(nb_json, encoding='utf-8', newline='')
         assert drive_nb.read_bytes() == nb_path.read_bytes()
         sha = hashlib.sha256(drive_nb.read_bytes()).hexdigest()
@@ -1798,14 +1828,44 @@ def generate_one(slug: str, argv: list[str] | None = None) -> tuple[dict, str]:
     return nb, drive_id
 
 
+def _magpie_launcher() -> tuple[str, ...] | None:
+    """How to run the Magpie CLI from here: argv prefix, or None when it is not installed.
+
+    A `magpie` on PATH that Windows can execute (.exe/.cmd/.bat, or any file on POSIX) is called directly. An
+    extensionless sh shim (Git Bash installs one) is reached through `bash -lc`, but only after the shell itself
+    confirms `command -v magpie`, so a WSL launcher named bash.exe never gets a say.
+    """
+    exe = shutil.which('magpie')
+    if exe and (os.name != 'nt' or Path(exe).suffix.lower() in ('.exe', '.cmd', '.bat', '.com')):
+        return (exe,)
+    bash = shutil.which('bash')
+    if bash:
+        try:
+            probe = subprocess.run([bash, '-lc', 'command -v magpie'], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if probe.returncode == 0 and probe.stdout.strip():
+            return (bash, '-lc')
+    return None
+
+
+def _run_magpie(launcher: tuple[str, ...], *args: str, **kw) -> subprocess.CompletedProcess:
+    if launcher[-1] == '-lc':
+        argv = [*launcher, 'magpie ' + shlex.join(args)]
+    else:
+        argv = [*launcher, *args]
+    return subprocess.run(argv, **kw)
+
+
 def sync_magpie_models():
     # `magpie provider models <id> <ids…>` 是整体替换：先读现有模型（model list + model specs）再取并集，
     # 同时剔除并 reset 已移入 ARCHIVED_MODELS 的归档模型，确保 Magpie 不残留归档僵尸条目。
-    bash_bin = r'C:\Program Files\Git\bin\bash.exe'
-    listed = subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie model list'],
-                            capture_output=True, text=True, encoding='utf-8', check=True).stdout
-    specs = subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie model specs'],
-                           capture_output=True, text=True, encoding='utf-8', check=True).stdout
+    launcher = _magpie_launcher()
+    if launcher is None:
+        print('Magpie CLI not found on PATH; skipped --sync-magpie (it is an optional gateway, nothing else depends on it).')
+        return
+    listed = _run_magpie(launcher, 'model', 'list', capture_output=True, text=True, encoding='utf-8', check=True).stdout
+    specs = _run_magpie(launcher, 'model', 'specs', capture_output=True, text=True, encoding='utf-8', check=True).stdout
     existing = [tok.split('/', 1)[1] for tok in (listed + '\n' + specs).split()
                 if tok.startswith('qwen-colab/') and not tok.endswith('/*')]
     aliases = [m['alias'] for m in MODELS.values()]
@@ -1813,18 +1873,11 @@ def sync_magpie_models():
     keep = [a for a in dict.fromkeys(existing + aliases) if a not in archived_aliases]
     for arch in sorted(archived_aliases & set(existing)):
         for sub in ('spec', 'efforts', 'wire', 'name'):
-            subprocess.run([bash_bin, '-lc', f'~/.local/bin/magpie model {sub} qwen-colab/{arch} --reset'],
-                           capture_output=True, check=False)
-    subprocess.run([bash_bin, '-lc', '~/.local/bin/magpie provider models qwen-colab ' + ' '.join(keep)], check=True)
+            _run_magpie(launcher, 'model', sub, f'qwen-colab/{arch}', '--reset', capture_output=True, check=False)
+    _run_magpie(launcher, 'provider', 'models', 'qwen-colab', *keep, check=True)
     for alias in aliases:
-        subprocess.run(
-            [
-                bash_bin,
-                '-lc',
-                f'~/.local/bin/magpie model spec qwen-colab/{alias} --context 262144 --output 65536 --vision on --reasoning low,medium,high,xhigh',
-            ],
-            check=True,
-        )
+        _run_magpie(launcher, 'model', 'spec', f'qwen-colab/{alias}', '--context', '262144', '--output', '65536',
+                    '--vision', 'on', '--reasoning', 'low,medium,high,xhigh', check=True)
 
 
 def probe_hf_repo(repo_id: str, rev: str = 'main') -> None:
@@ -1879,6 +1932,8 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> None:
     dst = out_path or yoga_runners_path()
     if not dst.parent.exists():
         print(f'Colab-yoga not installed ({dst.parent} missing); skipped exporting runners. '
+              'Install it to %LOCALAPPDATA%\\Programs\\Colab-yoga, or unzip it anywhere and set COLAB_YOGA_DIR to that '
+              'folder, then re-run `python -X utf8 scripts/colab_kernel.py --all`. '
               'Optional app: https://github.com/incredible404-rgb/Colab-yoga')
         return
     marker = '就绪横幅 + WebUI 标签页 + 停机按钮'
@@ -1915,7 +1970,21 @@ def run_single(slug: str):
     generate_one(slug)
 
 
+def positional_args(args: list[str]) -> list[str]:
+    """Model slugs on the command line: everything that is neither a flag nor the value of --output-dir."""
+    slugs, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == '--output-dir':
+            skip = True
+        elif not a.startswith('-'):
+            slugs.append(a)
+    return slugs
+
+
 def main():
+    force_utf8()
     args = sys.argv[1:]
     if '--probe-hf' in args:
         idx = args.index('--probe-hf')
@@ -1927,7 +1996,8 @@ def main():
         print('Active MODELS:', ', '.join(f"{k} ({v['alias']})" for k, v in MODELS.items()))
         print('Archived ARCHIVED_MODELS:', ', '.join(f"{k} ({v['alias']})" for k, v in ARCHIVED_MODELS.items()))
         return
-    targets = list(MODELS.keys()) if ('--all' in args or not [a for a in args if not a.startswith('-')]) else [a for a in args if not a.startswith('-')]
+    named = positional_args(args)
+    targets = list(MODELS.keys()) if ('--all' in args or not named) else named
     for slug in targets:
         if slug not in ALL_MODELS:
             raise SystemExit(f'Unknown model slug: {slug}. Active: {", ".join(MODELS)} | Archived: {", ".join(ARCHIVED_MODELS)}')

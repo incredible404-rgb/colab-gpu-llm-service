@@ -41,9 +41,13 @@ already uses start_new_session=True.
 
 Colab Secrets and drive.mount() do not work in CLI sessions; the kernel downloads from pinned Hugging Face
 revisions and reads HF_TOKEN from the environment first, so a local HF_TOKEN is forwarded when present.
-The colab CLI must be authorized once (`colab sessions` prints the OAuth URL; token in
-~/.config/colab-cli/token.json). Its DEBUG log ~/.config/colab-cli/colab.log records executed code,
+The colab CLI must be authorized once, by a person at a terminal: `colab sessions` prints the OAuth URL and
+waits on input() for the pasted code (token in ~/.config/colab-cli/token.json). An agent without an
+interactive stdin hangs there. Its DEBUG log ~/.config/colab-cli/colab.log records executed code,
 which includes the same credentials the generated notebooks already carry.
+
+Run it as `python -X utf8 scripts/colab_cli.py ...`; main() also forces UTF-8 on stdout/stderr, so a console
+code page never turns an echoed kernel line into a UnicodeEncodeError while a GPU is allocated.
 """
 from __future__ import annotations
 
@@ -58,6 +62,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from stdio_utf8 import force_utf8  # noqa: E402
 
 # `status` and `stop` are the commands run most often and need none of these: requests alone is ~170 ms of
 # import time, colab_kernel (+ secrets_config, colab_sync, sqlite3) another ~35 ms. Functions import what they
@@ -304,11 +309,14 @@ def _config():
     from secrets_config import FIELDS, load_config
     for spec in ALL_MODELS.values():
         FIELDS.setdefault(spec['drive_key'], (spec['env_key'], spec['placeholder']))
+    from secrets_config import missing_required
     config, _, _, sources = load_config([])
-    needed = ('api_key', 'ts_client_id', 'ts_client_secret', 'tailnet_fqdn')
-    missing = [f for f in needed if sources.get(f) == 'placeholder']
+    # Runs before any `colab new`: a value copied from .secrets.example.json counts as missing, so a
+    # half-filled file never gets as far as allocating a paid GPU.
+    missing = missing_required(sources)
     if missing:
-        raise SystemExit('missing %s in .secrets.json / environment' % ', '.join(missing))
+        raise SystemExit('missing %s in .secrets.json / environment (empty or still a <YOUR_...> placeholder from '
+                         '.secrets.example.json); nothing was allocated' % ', '.join(missing))
     return config
 
 
@@ -389,28 +397,57 @@ def _reuse_active_session_as(slug: str, gpu: str, active: list[str]) -> bool:
         return False
 
 
-def _ensure_session(slug: str, gpu: str):
+def _ensure_session(slug: str, gpu: str) -> bool:
+    """Make sure a session named slug exists. True only when this call allocated a new runtime (colab new)."""
     active = sessions()
     if slug in active:
         print('[colab_cli] reusing session %s' % slug, flush=True)
-        return
+        return False
     if active and _reuse_active_session_as(slug, gpu, active):
-        return
+        return False
     shape = [] if gpu in ('G4', 'L4') else ['--high-mem']
     print('[colab_cli] colab new -s %s --gpu %s %s' % (slug, gpu, ' '.join(shape)), flush=True)
-    print(colab('new', '-s', slug, '--gpu', gpu, *shape, timeout=900).strip(), flush=True)
+    try:
+        print(colab('new', '-s', slug, '--gpu', gpu, *shape, timeout=900).strip(), flush=True)
+    except BaseException:
+        # The backend may have assigned the VM before the CLI gave up (timeout, Ctrl-C); do not leave it burning.
+        print('[colab_cli] colab new did not finish cleanly; releasing anything it allocated', flush=True)
+        try:
+            cmd_stop([slug])
+        except BaseException as err:
+            print('[colab_cli] cleanup after failed colab new also failed: %s' % err, flush=True)
+        raise
+    return True
 
 
 def cmd_launch(slug: str, gpu: str, idle_min: int):
-    """new --gpu, start the TFE daemon, exec the notebook's first cell in the kernel, poll /health."""
+    """new --gpu, start the TFE daemon, exec the notebook's first cell in the kernel, poll /health.
+
+    An unexpected exception after this call allocated the runtime releases it (same rule as cmd_start).
+    """
+    state = {'created': False}
+    try:
+        return _cmd_launch(slug, gpu, idle_min, state)
+    except Exception as err:
+        if state['created']:
+            print('[colab_cli] unexpected %s; releasing the runtime this launch allocated' % type(err).__name__, flush=True)
+            cmd_stop([slug])
+        raise
+
+
+def _cmd_launch(slug: str, gpu: str, idle_min: int, state: dict):
     import requests
     from colab_kernel import ALL_MODELS
     config = _config()
     cell_exec_code = launch_exec_code(notebook_first_cell(slug))
-    if '<YOUR_' in cell_exec_code:
+    from secrets_config import FIELDS, REQUIRED
+    stale = [f for f in REQUIRED if FIELDS[f][1] in cell_exec_code]
+    if stale:
+        # Only the four required values matter; an unset optional field (file bridge IP, Drive ids) is fine.
         raise SystemExit(
-            'notebook %s contains sanitized <YOUR_...> placeholders; '
-            'generate a private build first with: python scripts/colab_kernel.py %s' % (ALL_MODELS[slug]['notebook'], slug))
+            'notebook %s still holds sanitized <YOUR_...> placeholders (%s); '
+            'generate a private build first with: python -X utf8 scripts/colab_kernel.py %s' % (
+                ALL_MODELS[slug]['notebook'], ', '.join(stale), slug))
     # svc:qwen publishes raw TCP :443 to llama-server. HTTPS on that name never returns 200.
     health = 'http://%s:443/health' % config['tailnet_fqdn']
     before = usage()
@@ -420,7 +457,7 @@ def cmd_launch(slug: str, gpu: str, idle_min: int):
     t_assign = time.monotonic()
     info['assign_begin'] = time.time()
     print('[colab_cli] assign_begin epoch=%.3f wall=%s' % (info['assign_begin'], time.strftime('%Y-%m-%d %H:%M:%S')), flush=True)
-    _ensure_session(slug, gpu)
+    state['created'] = _ensure_session(slug, gpu)
     assign_s = time.monotonic() - t_assign
     info['assign_s'] = assign_s
     info['assign_done'] = time.time()
@@ -491,27 +528,45 @@ def cmd_start(slug: str, gpu: str, idle_min: int, verify: bool, keep_on_fail: bo
     code = headless_setup(slug, config, idle_min)
     before = usage()
     print('[colab_cli] balance %.2f CU, %d active' % (before['balance'] or 0, before['active']), flush=True)
-    _ensure_session(slug, gpu)
-    try:
-        start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
-    except SystemExit as err:
-        print('[colab_cli] %s' % err, flush=True)
-        if not keep_on_fail:
-            print('[colab_cli] releasing the runtime so a failed start does not keep burning CU', flush=True)
-            cmd_stop([slug])
-        raise
-    t0 = time.monotonic()
-    rc = exec_stream(slug, code, timeout_s=3600)
-    ok = rc == 0 and remote_check(config, slug)
-    if ok and verify:
-        ok = exec_stream(slug, _cells(slug, config)['verify-' + slug], timeout_s=1800) == 0
-    after = usage()
-    print('[colab_cli] start %s in %.0fs | balance %.2f CU | rate %.2f CU/h' % (
-        'OK' if ok else 'FAILED', time.monotonic() - t0, after['balance'] or 0, after['rate'] or 0), flush=True)
-    if not ok and not keep_on_fail:
-        print('[colab_cli] releasing the runtime so a failed start does not keep burning CU', flush=True)
+    created = _ensure_session(slug, gpu)
+    released = False
+
+    def release(reason: str):
+        nonlocal released
+        if released or keep_on_fail:
+            return
+        released = True
+        print('[colab_cli] %s; releasing the runtime so a failed start does not keep burning CU' % reason, flush=True)
         cmd_stop([slug])
-    return 0 if ok else 1
+
+    try:
+        try:
+            start_keepalive(slug, idle_min)  # before the long download: without the kernel heartbeat the VM is reclaimed in ~20 min
+        except SystemExit as err:
+            print('[colab_cli] %s' % err, flush=True)
+            release('keep-alive failed')
+            raise
+        t0 = time.monotonic()
+        rc = exec_stream(slug, code, timeout_s=3600)
+        ok = rc == 0 and remote_check(config, slug)
+        if ok and verify:
+            ok = exec_stream(slug, _cells(slug, config)['verify-' + slug], timeout_s=1800) == 0
+        after = usage()
+        print('[colab_cli] start %s in %.0fs | balance %.2f CU | rate %.2f CU/h' % (
+            'OK' if ok else 'FAILED', time.monotonic() - t0, after['balance'] or 0, after['rate'] or 0), flush=True)
+        if not ok:
+            release('start failed')
+        return 0 if ok else 1
+    except BaseException as err:
+        # Anything unexpected after the runtime exists (UnicodeEncodeError on a console, a dead network,
+        # Ctrl-C) must not strand a billed G4. Only a runtime this call allocated is released; a reused one
+        # (for example Colab-yoga's) keeps running and is reported instead.
+        if created:
+            release('unexpected %s' % type(err).__name__)
+        elif not released:
+            print('[colab_cli] unexpected %s; the reused session %s keeps running (stop it with: stop %s)' % (
+                type(err).__name__, slug, slug), flush=True)
+        raise
 
 
 def cmd_verify(slug: str):
@@ -556,6 +611,31 @@ def _in_background(fn):
     return wait
 
 
+def _release_leftovers(u: dict) -> dict:
+    """Free assignments `colab stop` cannot name, cheapest route first; returns the fresh usage().
+
+    1. Colab-yoga bridge `stop_all` (when installed): official unassign per endpoint, no browser.
+    2. colab_sync --release-all: Colab's /tun/m endpoints through a signed-in Edge tab (needs a browser driver,
+       see "Browser fallback" in SKILL.md).
+    Anything still active afterwards is for the person: Colab web page > Runtime > Manage sessions.
+    """
+    if YOGA_PY.exists() and YOGA_BRIDGE.exists():
+        print('[colab_cli] %d assignment(s) left, releasing via the Colab-yoga bridge (stop_all)' % u['active'], flush=True)
+        try:
+            subprocess.run([str(YOGA_PY), '-u', str(YOGA_BRIDGE), 'stop_all'], env=ENV, timeout=180)
+        except (OSError, subprocess.TimeoutExpired) as err:
+            print('[colab_cli] Colab-yoga stop_all failed: %s' % err, flush=True)
+        u = usage()
+    if u['active']:
+        print('[colab_cli] %d assignment(s) left, trying colab_sync --release-all (needs a signed-in Edge tab)' % u['active'], flush=True)
+        subprocess.run([sys.executable, '-X', 'utf8', str(Path(__file__).with_name('colab_sync.py')), '--release-all'], env=ENV)
+        u = usage()
+    if u['active']:
+        print('[colab_cli] still %d active: open https://colab.research.google.com > Runtime > Manage sessions and '
+              'terminate them there' % u['active'], flush=True)
+    return u
+
+
 def cmd_stop(names: list[str]):
     stop_all = not names or names == ['--all']
     live, scheduled, state_sessions = [], [], []
@@ -578,10 +658,8 @@ def cmd_stop(names: list[str]):
             break
         time.sleep(3)
     if u['active'] and (stop_all or '?' in sessions()):
-        # Assignments the CLI has no local name for ("[?]") cannot be stopped by name; kill them via /tun/m in Edge.
-        print('[colab_cli] %d assignment(s) left, releasing via colab_sync --release-all' % u['active'], flush=True)
-        subprocess.run([sys.executable, '-X', 'utf8', str(Path(__file__).with_name('colab_sync.py')), '--release-all'], env=ENV)
-        u = usage()
+        # Assignments the CLI has no local name for ("[?]") cannot be stopped by name.
+        u = _release_leftovers(u)
     print('Active assignments: %d | Burn rate: %.2f CU/h | Balance: %.2f CU' % (u['active'], u['rate'] or 0, u['balance'] or 0))
     return 0 if u['active'] == 0 else 1
 
@@ -630,6 +708,7 @@ def cmd_yoga(rest: list[str]) -> int:
 
 
 def main(argv: list[str]):
+    force_utf8()
     if not argv or argv[0] in ('-h', '--help'):
         print(__doc__)
         return 0
