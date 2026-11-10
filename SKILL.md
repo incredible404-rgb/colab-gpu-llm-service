@@ -1,211 +1,198 @@
 ---
 name: colab-gpu-llm-service
-description: 在 Google Colab 付费 GPU 上持久化并运行 GGUF 大模型，配置 llama.cpp、MTP 投机解码和推理档位，接入 pi 或 OpenAI 兼容客户端，并用固定域名与鉴权安全暴露。用于 Colab A100 启动、模型调参、冷启动异常、CU 预算、Drive 持久化、隧道地址每次变化、无鉴权公网入口、pi provider 或 llama-server 排障时。
+description: 在 Google Colab 付费 GPU（默认 G4 RTX PRO 6000 96GB）上部署并管理 GGUF 大模型服务（llama.cpp、MTP 投机解码），经 Tailscale 固定域名提供 OpenAI 兼容接口，无头 CLI + 30 秒内核心跳保活。用于首次安装与第一次开机、启动/停止/续命 Colab GPU、查 CU 余额与燃烧率、新增/切换/归档模型、显存与分片核算、清理 [?] 幽灵实例、排障，以及对接可选的 Colab-yoga 托盘工作台。Deploy and run GGUF LLMs on a paid Colab G4 via google-colab-cli (kernel heartbeat, Tailscale Service, CU accounting).
 ---
 
 # Colab GPU LLM Service
 
-把一个有限时、可丢失的 Colab 运行时做成可重复启动的模型服务。模型和运行环境放 Drive；GPU 只承载当前会话；公网入口必须有应用层鉴权。
+把有限时、每局清空 `/content` 的 Colab G4（RTX PRO 6000 Blackwell 96GB 显存 + 176 GiB DDR5 内存）做成可重复冷启动的 GGUF 模型服务。权重每次从 Hugging Face 固定 revision 经 32 路并发直写 `/dev/shm` 内存盘，对外通过 Tailscale Service 暴露固定地址 `http://qwen.<你的tailnet>.ts.net:443`（OpenAI 兼容 `/v1`，另带 WebUI）。
 
-## 1. 先定边界
+**给 agent 的硬规则**
 
-确认模型文件、量化、GPU 型号、上下文、使用时长和是否要公网访问。状态类信息按当天实际页面或命令回答；Colab 套餐、CU 单价和可用 GPU 会变化。
+1. 开机会烧付费 CU：起 GPU 前先向用户确认；任务结束必须 `stop --all` 并核验 `0 active`。
+2. `.secrets.json` 与不带 `--sanitized` 生成的 notebooks 含真实密钥，不回显、不提交、不外传。
+3. 状态以命令实时输出为准（`status`、`colab_kernel.py --list`），不要凭本文档回答余额、费率或模型清单。
 
-完成条件：写下目标模型 ID、启动参数、预算上限和预期使用场景。
+---
 
-## 2. 持久化模型和运行环境
+## 0. 前置条件（先逐项自检）
 
-首次迁移单独做，并优先使用 CPU 运行时：
-
-1. 固定 Hugging Face repo、revision、文件名、字节数和 SHA-256。
-2. 下载后用大小和哈希验收，再上传到 Drive。
-3. 同时保存 `llama-server`、CUDA 运行库和 manifest。
-4. 日常启动从 Drive 并发读取，按文件大小跳过已有副本；完整哈希只在首次迁移和怀疑损坏时做。
-
-完成条件：Drive 中存在主权重、配套 draft/MTP 文件、`llama-server`、CUDA 库和 manifest；每项的大小与记录一致。
-
-## 3. 启动与预热（同核双轨：CLI 主力 + 网页版备用）
-
-两套方案共用 `scripts/colab_kernel.py` 生成的同一份首格代码与 `.secrets.json` 配置，按场景选择：
-
-| 轨道 | 角色 | 启动 / 查账 / 释放命令 | 适用场景 |
-|---|---|---|---|
-| **Track A · 官方 Colab CLI + 30s 内核心跳** | **主力（日常默认）** | `python scripts/colab_cli.py start qwen38-fn`（或 `launch`） / `status` / `stop --all` | 日常启动 `qwen38-fn` 或 `qwen38-fn-nl`，无需开浏览器标签页；45 分钟无推理自动停机 |
-| **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | **备用与兜底** | `python scripts/make_g4_fn_notebook.py --sync-colab --run-cell1`；`colab_meter.py status / stop --all`；`colab_sync.py --release-all` | ① 需要网页首格按钮（开关破限 LoRA、停机）或第 2 格**免释放热切换模型**；② 跑已归档笔记本（122B / Nemotron / Gemma4）；③ CLI OAuth 未授权/过期时免 OAuth 直用已登录 Edge；④ 强杀 CLI 无法按名停止的 `[?]` 幽灵实例（`colab_cli.py stop --all` 会自动回调它兜底） |
-
-### 主力方案：官方 Colab CLI + 30 秒内核心跳保活
-
-CLI 0.7.5 创建的运行时（T4、G4 都一样）若没有新的内核执行，会在创建后 21～35 分钟被 Colab 回收。持续推理、一个长时间阻塞的单元、每 60 秒的 TFE `/tun/m/<endpoint>/keep-alive/` 都挡不住；老 CLI 的 `RuntimeService/KeepAliveAssignment` RPC 现在返回 403 USER_PROJECT_DENIED。**能保活的是每 30 秒执行一次的一行短代码**（`colab exec`，即 Wakeloom 本地模式的做法），由 `colab_keepalive.py` 负责。2026-11-07 实测：T4 对照组 21.0 分钟被回收，心跳组活满 42 分钟；G4 跑 `qwen38-fn` 活过 39 分钟，最后由空闲守护停机，不是被回收（证据见 `debug-runs/2026-11-07-*kernel-beat*`）。超过 1 小时的会话还没有实测；要长时间用时，第一次留意 `status` 的心跳计数。
-
-内核登记的 2 个 3.8fn 量化（`qwen38-fn`、`qwen38-fn-nl`）用 [`scripts/colab_cli.py`](scripts/colab_cli.py) 一条命令起停，背后是 Google 官方 `google-colab-cli`（`uv tool install google-colab-cli`，`colab.exe`）：
-
-```bash
-python scripts/colab_cli.py start  qwen38-fn  # 开 G4 → 跑首格同一份代码 → Tailscale 验 /v1/models → 全链路验收
-python scripts/colab_cli.py launch qwen38-fn  # LAUNCH_DETACHED=1 后台脱离拉起 → 轮询 /health
-python scripts/colab_cli.py status            # 余额 / 燃烧率 / 会话 / 心跳与空闲守护状态
-python scripts/colab_cli.py stop   --all      # 释放并核验 0 active / 0 CU/h（遇 [?] 自动回调 colab_sync 强杀）
-```
-
-- 它复用 `build_notebook_dict` 生成的首格代码，只切掉需要前端的尾巴（横幅、弹 WebUI、停机按钮）。
-- `start` / `launch` 会用 CLI 自己的解释器后台起 [`scripts/colab_keepalive.py`](scripts/colab_keepalive.py)：每 30 秒做一次内核心跳，每 60 秒做一次 TFE ping，并经 Tailscale 查 `/slots`，连续 `--idle-min`（默认 45）分钟无推理就 `colab stop`（2026-11-07 G4 实测已按时触发）；状态与日志在 `~/.config/colab-cli/keepalive-<slug>.json|.log`（`beats`/`beat_fails` 计数）。启动格执行期间出现一两次 `kernel_beat_error ... timeout` 属正常，那是心跳在排队。电脑睡眠或关机时心跳停了，Colab 20 多分钟后自己回收，忘关也烧不了多久。
-- `status` 显示「NO keep-alive running」就是守护进程不在：再跑一次 `start <slug>`（已有会话会复用，首格对健康服务是空操作）或直接 `stop`。
-- 首次要授权一次：跑 `colab sessions`，打开它打印的 Google 链接点「允许」，把授权码贴回终端；token 存 `~/.config/colab-cli/token.json`，之后不再弹窗。
-- CLI 会话里 **Colab Secrets（`userdata`）和 `drive.mount()` 都不可用**：内核从 Hugging Face 固定 revision 下载、凭据在生成时写入，不依赖二者；本机有 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 时会自动带上。
-
-### 备用方案：浏览器网页版同步与运行（`--sync-colab --run-cell1`）
-
-需要浏览器交互控制台、免释放热切换模型、跑归档多模型笔记本或 CLI OAuth 不可用时，走已登录 Edge 的网页通道（按 `BrowserMCP → Playwriter → playwright-cli` 自动降级）：
-
-```bash
-python scripts/make_g4_fn_notebook.py --sync-colab --run-cell1      # 推送 IQ4_XS-plus 并在网页点首格运行
-python scripts/make_g4_fn_nl_notebook.py --sync-colab --run-cell1   # 推送 IQ4_NL 高精度版并在网页点首格运行
-```
-
-实测（2026-11-06，G4）：开机到 `/v1/models` 可用 130 s；`exec` 结束后 llama-server 等后台进程照常存活，内核变量跨次保留。
-
-启动顺序固定为：恢复文件 → 启动 `llama-server` → 等 `/health` → 调 `/v1/models` 确认别名 → 发两个短请求预热。
-
-冷启动会触发权重首次触页、CUDA/cuBLAS 初始化和图构建。第一次请求明显变慢时，先做连续请求对比，再判断真实吞吐。把冷启动开销留在启动单元里，用户的第一次提问才稳定。
-
-常用结构：
-
-```python
-server = subprocess.Popen(command, stdout=log, stderr=log, env=env)
-for _ in range(180):
-    if requests.get("http://127.0.0.1:8081/health", timeout=2).ok:
-        break
-    time.sleep(2)
-else:
-    raise RuntimeError("llama-server did not become healthy")
-```
-
-内核（`scripts/colab_kernel.py`）在预热后还做两件事（生产启动不跑拼写探针、不做 SHA-256，`_assert_prod_startup` 会拦住）：
-
-- **内存回收**：删掉 `/dev/shm` 里只给显存用的分片副本（运行期由 CPU 读取的 PLE 分片保留）。`--cache-ram` 设为 16 GiB 加上可回收内存的一半，最多 64 GiB。删掉了哪些文件、对应哪个服务 PID 记在 `released-copies.json`，服务不重启时重跑首格不会重新下载；服务挂了或配置变了，就会重新下载这几片。
-- **热切换**：「热切换模型」格不释放 G4：先停掉当前服务、清掉其他模型的文件（`llama-dist` 留着复用），再执行目标模型的首格。Tailscale 与 `svc:qwen` 地址不变，客户端只需换模型名。覆盖内核登记的全部 G4 模型。
-
-完成条件：`/health` 返回 200，`/v1/models` 返回预期模型 ID，预热请求成功。怀疑权重或分片摆放有问题时，再手动对比一段已知输出，不在启动时考拼写。
-
-## 4. 调参与验收
-
-先按模型卡和模板约束选参数，再测。不要只凭一次生成判断速度或 MTP 是否生效。
-
-- 上下文、KV cache 类型和 `--parallel` 一起决定显存余量。
-- MTP 需要匹配的 draft 文件；检查启动日志中的 draft model、acceptance 和 mean accepted length。
-- 推理档位由聊天模板决定。模板只接受某些值时，在客户端做映射。
-- 用同一提示至少做一次冷请求和两次连续请求，记录 prompt/output tokens、耗时、`predicted_per_second`。
-- 工具型客户端另做一次真实工具调用；文本聊天成功不代表工具调用兼容。
-
-具体模型的已验证参数、文件哈希、笔记本位置与启动细节（由 [`scripts/colab_kernel.py`](scripts/colab_kernel.py) 维护与一键分发：`python scripts/colab_kernel.py --all --sync-magpie`；Colab 会话开着时别重新生成，会覆盖正在用的笔记本，WebUI 本机小说目录读写桥为 [`scripts/local_novel_mcp.py`](scripts/local_novel_mcp.py)）：
-- G4 96GB（综合 1 · 125B 小说共创调优版：`Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS`）：见 [`references/qwen38-flash-next-g4.md`](references/qwen38-flash-next-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-g4-colab.ipynb)（薄入口 [`scripts/make_g4_fn_notebook.py`](scripts/make_g4_fn_notebook.py)）。
-- G4 96GB（综合 1 高精度版，同权重 IQ4_NL，待实机 A/B：`Swift-1.5-Qwen3.8-Flash-Next-IQ4_NL`）：见 [`references/qwen38-flash-next-nl-g4.md`](references/qwen38-flash-next-nl-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb)（薄入口 [`scripts/make_g4_fn_nl_notebook.py`](scripts/make_g4_fn_nl_notebook.py)）。
-- G4 96GB（Strata 实验，未实测，不进内核：Unsloth `UD-IQ4_XS-v31`）：见 [`references/qwen38-flash-next-strata-g4.md`](references/qwen38-flash-next-strata-g4.md)，笔记本在 [`notebooks/qwen3.8-flash-next-strata-g4-colab.ipynb`](notebooks/qwen3.8-flash-next-strata-g4-colab.ipynb)（[`scripts/make_strata_fn_notebook.py`](scripts/make_strata_fn_notebook.py)）。不要和上面两本同时开。
-- 已移出内核（2026-11-06 冻结）：122B Qwopus、Nemotron-120B、Gemma-4-31B。最后一版笔记本仍在 `notebooks/`，可在浏览器里手动跑，但不再更新，`colab_cli.py` 也不认它们；当时的多模型内核、生成脚本和参考文档在 [`archive/multi-model-kernel/`](archive/multi-model-kernel/)，要恢复就把归档里的 `colab_kernel.py` 换回 `scripts/`。
-
-完成条件：模型 ID、思考字段、至少两次正常生成和一次工具调用均有可复核结果。
-
-## 5. 选择公网入口
-
-先选威胁模型：
-
-| 需求 | 入口 | 必须补上的保护 |
+| 项 | 要求 | 自检 |
 |---|---|---|
-| 只在 Colab 内用 | 无隧道 | 无 |
-| 临时给本机或朋友用 | Quick Tunnel | `llama-server --api-key-file`；地址短期有效 |
-| 固定地址给网页和 API | Cloudflare Named Tunnel + 自有域名 | Web 走 Access；API 走独立 hostname + API key |
-| 只有自己的设备要访问 | Tailscale Service + Serve（固定 `svc.<tailnet>.ts.net:443`，仅 tailnet 内可见） | 依赖 WireGuard 私网身份隔离（免 `--api-key-file` 以便 WebUI 免密即开即用）；若上 Funnel 公网则必加 `--api-key-file` |
-| 不想买域名但要公网 | Tailscale Funnel 或服务商保留域名 | 应用层 API key |
+| Colab 付费额度 | 付费计算单元（CU）：Colab Pro / Pro+ / Ultra 订阅或按量购买，账号能选 G4。免费档不行。费率与额度会变，估算见 [`references/cu-budget.md`](references/cu-budget.md) | `colab usage`（装好 CLI 后） |
+| 主机 | Windows 10/11 + Python 3.10+ + Git。脚本用计划任务与 `taskkill` 清理保活进程，按 Windows 编写；macOS/Linux 未验证 | `python --version` |
+| Python 依赖 | 仅 `requests`，其余为标准库 | `pip install requests` |
+| 官方 Colab CLI | **google-colab-cli 0.7.5**，固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
+| Tailscale | 本机已安装并登录；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签、OAuth 客户端；客户端 ≥ 1.78 | `tailscale version` |
+| HF 令牌（可选） | 受限/限速模型需要；本机 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 会被自动转发到运行时 | |
+| Colab-yoga（可选） | Windows 托盘多模态工作台（视频/生图/ComfyUI），与本技能共用同一台 G4。不装不影响任何核心命令 | `python scripts/colab_cli.py yoga status` |
+| Edge + BrowserMCP、Node.js（可选） | 仅后备轨道（网页同步、零 OAuth 查账与强杀）需要 | |
 
-固定域名本身不提供安全。每次变化的随机 Quick Tunnel 地址只是隐蔽，不等于鉴权。任何可写 API 的公网入口都先加 `llama-server` API key。
-
-推荐的 Cloudflare 结构：
-
-- `qwen.example.com` → Web 聊天界面；用 Cloudflare Access 限制到本人邮箱。
-- `qwen-api.example.com` → OpenAI 兼容 API；不套浏览器登录，由 `--api-key-file` 校验 Bearer key。
-- 两个 hostname 都路由到 Colab 内的 `http://127.0.0.1:8081`。
-- Tunnel token 和模型 API key 放 Colab Secrets，勾选 notebook access；写入临时文件时设 `0600`。
-
-完整命令、Secret 名称、Dashboard 配置、轮换方法和 `pi` 配置见
-[`references/secure-remote-service.md`](references/secure-remote-service.md)。
-
-完成条件：未带 key 的 API 请求被拒绝；带 key 的 `/v1/models` 和聊天请求成功；Web 只有授权账号可进；固定地址在运行时重启后仍不变。
-
-只用自己设备时，优先 Tailscale：不暴露公网、请求自带 `Tailscale-User-Login` 身份头。
-Colab 每换一次运行时 `/content` 就清空、节点改名成 `qwen-colab-1/2`，所以对外地址要用
-**Tailscale Service**（`svc:qwen` → `qwen.<tailnet>.ts.net`）而不是节点域名；新运行时用
-OAuth 客户端现场签发带 `tag:colab` 的一次性 `ephemeral` auth key 加入，ACL 的
-`autoApprovers.services` 自动审批，全程不需要人工登录或点 Approve。安装、`serve --bg`、
-两个必踩的坑（中断执行杀 daemon、缺 `--statedir` 导致 HTTPS `InternalError`）、ACL 片段和
-验证方法见 [`references/tailscale-serve.md`](references/tailscale-serve.md)。
-
-## 6. 接入 pi
-
-本机已有 Magpie 时，优先在 Magpie 原生注册 custom provider，上游填 Tailscale Service 的完整 HTTPS `/v1` 地址与模型 key；pi 复用已有本机网关 `http://127.0.0.1:3425/v1`。用 `magpie model context/output/efforts` 管理模型声明并下发，不同时手改 Magpie 生成的 pi 条目。本机已在 Magpie `qwen-colab` 下注册内核登记的模型（`colab_kernel.py --sync-magpie` 会把该供应商的模型列表整体换成 `MODELS` 里的别名，不在注册表里的旧条目会被删；只加一个时用 `magpie provider models qwen-colab <现有全部 id> <新 id>` 再补 `magpie model spec`），分时复用 `http://qwen.<YOUR_TAILNET>.ts.net:443/v1`，pi 调用名加 `magpie/` 前缀；具体命令及边界见各模型参考文档。Magpie 负责模型请求和 token 用量，Colab 仍负责运行时与 CU；不上路由组即可按需手选，离线时不自动换供应商。
-
-没有 Magpie、需要独立直连时才使用下面的脚本。
-
-把 base URL 指向固定的 `https://qwen-api.example.com/v1`，把同一 API key 写入 provider。模型 ID 必须与服务端 alias 完全一致。
-
-```powershell
-pwsh -NoProfile -File scripts/update-pi-provider.ps1 `
-  -BaseUrl https://qwen-api.example.com `
-  -ApiKey '<same-secret>' `
-  -ServiceName qwen38-colab `
-  -ModelId Qwen3.8-27B-pi-Q4_K_M
-```
-
-脚本先备份 `~/.pi/agent/models.json`，只替换目标 provider，不改其他 provider 或默认模型。之后用：
-
-```powershell
-pi --model qwen38-colab/Qwen3.8-27B-pi-Q4_K_M
-```
-
-完成条件：`pi` 能列出一个非流式回答，并在需要时成功调用一个本地工具。
-
-## 7. 用完释放
-
-Colab 按运行时被分配的时间计费，空闲也扣 CU。CLI 启动的用 `python scripts/colab_cli.py stop --all`（或 `colab stop -s <slug>`），它会核验 `0 active / 0 CU/h`；CLI 叫不出名字的会话（`colab sessions` 里显示 `[?]`）自动转交 `colab_sync.py --release-all` 强杀。笔记本启动的在笔记本里终止服务后调用 `google.colab.runtime.unassign()`，再用 `python scripts/colab_meter.py stop --all` 兜底。
-
-完成条件：页面右上角显示“重新连接”；`代码执行程序 → 管理会话` 中没有正在进行的会话。旧输出保留不算运行凭据。
-
-### 零 OAuth 实时查账、双轨对账与幽灵实例强杀
-
-Colab 网页自带的 `/tun/m` 接口（`ccu-info`、`assignments`、`unassign/<endpoint>`）在已登录的 `colab.research.google.com` 标签页里直接可用，不需要任何 OAuth 或 API key。脚本按 BrowserMCP（`live-browser` 技能的 `browsermcp-bridge.mjs`）→ Playwriter → `playwright-cli -s=edge` 的顺序降级，在页面上下文里调用：已有任意 Colab 标签页就原样复用（不刷新、不跳转）；一个都没有就后台开临时页，`evaluate` 后立刻关闭，不留标签页。
+安装官方 CLI 并授权一次（先装 [`uv`](https://docs.astral.sh/uv/)，例如 `winget install astral-sh.uv` 或 `pip install uv`）：
 
 ```bash
-python scripts/colab_meter.py status [--json]      # Active assignments: N | Burn rate: X.XX CU/h | Balance: YYY.YY CU | Eligible GPUs: ...
-python scripts/colab_meter.py start -s lit -g G4   # 记录开机余额与时间（.colab-meter-state.json）
-python scripts/colab_meter.py stop  -s lit         # 强杀 + 二次核验 + 双轨对账单；--all 清场全部
-python scripts/colab_sync.py --status              # 同 status，不依赖 meter 状态文件
-python scripts/colab_sync.py --release-all         # 强杀全部活跃 assignment 并核验
+uv tool install "google-colab-cli==0.7.5"
+colab sessions          # 首次打印 OAuth 链接，浏览器授权后令牌存于 ~/.config/colab-cli/token.json
+colab usage             # 应显示 CU 余额；报授权错误就重跑 colab sessions
 ```
 
-- **强杀**：对每个 `endpoint` 先 `GET /tun/m/unassign/<endpoint>` 取 `token`，再 `POST` 同一地址并带 `X-Goog-Colab-Token`。释放后等 1.5 s 重查，最多 3 次，直到 `assignmentsCount == 0` 且 `consumptionRateHourly == 0`。这条路径能清掉笔记本页面已关闭、`runtime.unassign()` 没机会执行的**幽灵会话**，它们仍按小时扣 CU。
-- **双轨对账**：轨道 1 为云端账单实扣差值 `max(0, start_balance - end_balance)`；轨道 2 为墙钟时长折算 `dur_sec / 3600 * rate_hourly`。云端余额可能滞后几分钟，两条并列比单看一条可靠。
-- **与同步脚本联动**：`make_*_notebook.py --sync-colab --run-cell1` 成功后自动打点起始余额；`--release-runtime` 除了 `nb.kernel.unassignCurrentVm`，还会清理残留 assignment、核验 `0 active / 0.00 CU/h` 并打印对账单。
+Tailscale 一次性配置（ACL 的 `tagOwners` + `autoApprovers.services`、定义名为 `qwen` 的 Service、建只签发 `tag:colab` 认证密钥的 OAuth 客户端）按 [`references/tailscale-serve.md`](references/tailscale-serve.md) 的“一次性配置”三步做，拿到的 `client_id` / `client_secret` 填进 `.secrets.json`。
 
-完成条件：`status` 输出 `Active assignments: 0 | Burn rate: 0.00 CU/h`。这比页面“重新连接”更可靠，因为它直接读云端账本。
+---
 
-## 凭据与开源脱敏
+## 1. 从克隆到第一次开机（最短路径）
 
-真实配置放仓库根目录的 `.secrets.json`（已被 `.gitignore` 忽略，字段见 `.secrets.example.json`），也可用环境变量 `LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN` 与各笔记本的 `*_DRIVE_ID`（字段见 `scripts/secrets_config.py`）提供。`make_*_notebook.py` 默认读取它们生成自用笔记本；`--sanitized` 一律填占位符，`--output-dir <dir>` 改输出目录。`--sanitized` 与 `--sync-colab` 互斥，避免把占位符推进 Colab。
+```bash
+git clone https://github.com/incredible404-rgb/colab-gpu-llm-service.git
+cd colab-gpu-llm-service
+pip install requests
+cp .secrets.example.json .secrets.json      # 按第 2 节填写；该文件已被 .gitignore 忽略
 
-## 快速排障
+python scripts/colab_kernel.py --list       # 看现役/归档模型 slug；start 不带 slug 时用现役表第一个
+python scripts/colab_cli.py status          # 只读自检：CLI 已授权、读得到 CU 余额，不分配 GPU
+python scripts/colab_cli.py start           # 分配 G4 → 跑首格 → 检查 Tailscale /v1/models → 跑验证格
+```
 
-- `colab new --gpu G4` 报 "Backend rejected accelerator"：G4 只有一种 176 GiB 机型，带 `--high-mem` 会被拒；`colab_cli.py` 已对 G4/L4 不加该参数。
-- `colab exec` 报 `Timeout waiting for reply`：它默认 30 秒超时，长任务必须带 `--timeout`（`colab_cli.py` 已带）。
-- `colab sessions` 出现 `[?]`：本地状态里没有这个会话名（例如同名会话被重复创建），`colab stop` 停不掉，用 `colab_cli.py stop --all` 或 `colab_sync.py --release-all`。
-- 首格下载报 404：先跑 HF 核对（逐个 HEAD `resolve/<rev>/<path>`，比对 `X-Linked-Size` 与 `X-Linked-ETag`=sha256），registry 里的 rev、路径或哈希与参考文档不一致时以 HF 实际值为准改 `MODELS`。
-- 首条请求只有约 5 tok/s：先连续发两条；若恢复到几十 tok/s，属于冷启动，已由预热解决。
-- 首格报「需要重新启动服务，但缺少上次为扩大提示缓存而删掉的分片副本」：配置变了或旧服务不健康，旧服务已经停掉。再运行一次首格，会重新下载被删的那几片。只改缓存上限不会触发重启，新上限等下次启动才生效。
-- 内存回收提示「实际回收不到预计的一半」：说明这些分片仍被 mmap 映射着（mmap 模式下 CPU 侧张量所在的分片），要等服务重启才会真正归还；这时提示缓存别用满。
-- `pi` 返回模板错误：检查 `thinkingLevelMap`，把客户端不支持的档位映射到服务端接受的档位。
-- Cloudflare 地址每次变化：当前用的是 Quick Tunnel；换成 Named Tunnel，不要只做本地地址替换。
-- 固定域名能打开但不能聊天：确认 API hostname 没有误套 Cloudflare Access，并确认 `pi` 的 `apiKey` 与服务端一致。
-- 服务健康但工具调用失败：测试 `/v1/chat/completions` 的 tool calling，检查 `--jinja` 和模型聊天模板。
-- 新运行时上“日常启动 1/2”一直没输出、`/content` 里没有模型目录：它卡在 Google Drive 授权。
-  Colab 会弹一个 `accounts.google.com` 的“重新登录 … 继续”窗口，浏览器自动化点不动（CDP 派发鼠标事件超时），
-  必须本人点一次“继续”。长期解法是把 `auth.authenticate_user()` 之外的重活改成直接从 Hugging Face 拉取，
-  或先把 Drive 授权跑通再切 GPU，避免在 A100 上等授权烧 CU。
-- 切换运行时类型后，`/content` 清空、tailscaled 也一起消失：Tailscale Serve 单元要在新运行时里重跑一次，
-  管理台里该节点显示 offline 属正常，不是运行时已死。
+`start` 成功的标志是出现 `[colab_cli] start OK in <秒>s`，之后可用：
+
+```bash
+curl -H "Authorization: Bearer <api_key>" http://qwen.<你的tailnet>.ts.net:443/v1/models
+# 或浏览器打开 http://qwen.<你的tailnet>.ts.net:443/ 使用 WebUI（仅 tailnet 内可见，免密）
+```
+
+用完立即释放：
+
+```bash
+python scripts/colab_cli.py stop --all      # 核验末行 Active assignments: 0 | Burn rate: 0.00 CU/h
+```
+
+冷启动耗时取决于模型体量（百 GB 级权重要下载数分钟）。`start` 会在后台拉起保活进程，45 分钟无推理流量自动 `colab stop`。`launch` 是后台脱离拉起版本，它读取 `notebooks/` 里的私有构建，需先 `python scripts/colab_kernel.py <slug>` 生成；这个文件含真实密钥且与仓库里已提交的脱敏版同名，提交前先 `git status` 确认没被暂存。
+
+---
+
+## 2. `.secrets.json`：由 `.secrets.example.json` 复制并填写
+
+前四项是 `start` 的必填项，缺一项直接报 `missing ... in .secrets.json / environment`。每个字段也可用同名环境变量代替，优先级 `.secrets.json` → 环境变量 → 占位符。
+
+| 字段 | 环境变量 | 含义 |
+|---|---|---|
+| `api_key` | `LLAMA_API_KEY` | 你自定义的任意长随机串，写入运行时的 llama-server 作 Bearer 密钥，也是你访问 `/v1` 的密钥 |
+| `ts_client_id` | `TS_CLIENT_ID` | Tailscale OAuth 客户端 ID（权限仅 Auth Keys: Write，标签 `tag:colab`） |
+| `ts_client_secret` | `TS_CLIENT_SECRET` | 上述 OAuth 客户端的 secret，运行时用它现签一次性、临时的节点认证密钥 |
+| `tailnet_fqdn` | `TAILNET_FQDN` | 服务域名，形如 `qwen.<你的tailnet>.ts.net`（`qwen` 是你在 Tailscale 里建的 Service 名） |
+| `local_tailscale_ip` | `LOCAL_TAILSCALE_IP` | 可选。运行 `local_novel_mcp.py` 那台主机的 Tailscale IP，WebUI 本机文件桥用；不用文件桥可不填 |
+| `*_drive_id`（每个现役模型一项） | 见 `scripts/secrets_config.py` | 可选。该模型 notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab`（网页后备轨道）需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
+
+示例文件里的 `<YOUR_...>` 都是占位符，不是可用值。其余可调环境变量：
+
+| 环境变量 | 作用 |
+|---|---|
+| `COLAB_YOGA_DIR` | Colab-yoga 安装目录（默认 `%LOCALAPPDATA%\Programs\Colab-yoga`） |
+| `COLAB_NOTEBOOKS_DIR` | 生成 notebook 后镜像到的 Drive “Colab Notebooks”目录；不设则自动探测各盘符下的 `My Drive`，探测不到就不镜像 |
+| `DRIVEFS_DB` | 指定 Drive 客户端元数据库路径（自动解析 Drive 文件 ID 用） |
+| `NOVEL_ROOT` | `local_novel_mcp.py` 向 WebUI 暴露的本机目录 |
+| `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌 |
+
+---
+
+## 3. 命令速查
+
+```bash
+# 启停与状态（日常主力：官方 CLI + 30s 内核心跳）
+python scripts/colab_cli.py start  [<slug>] [--gpu G4] [--idle-min 45] [--no-verify] [--keep-on-fail]
+python scripts/colab_cli.py launch [<slug>]          # 后台脱离拉起（LAUNCH_DETACHED=1），轮询 /health
+python scripts/colab_cli.py verify [<slug>]          # 只重跑验证格
+python scripts/colab_cli.py status                   # CU 余额、燃烧率、活跃会话、心跳计数
+python scripts/colab_cli.py stop [<slug> | --all]    # 释放 GPU；遇 [?] 幽灵实例自动回调 colab_sync 强杀
+
+# 模型清单 / 探测 / 生成
+python scripts/colab_kernel.py --list                # 现役 MODELS 与归档 ARCHIVED_MODELS
+python scripts/colab_kernel.py --probe-hf <repo> [rev]  # 新模型 HF 预检：revision、字节数、sha256、张量数、PLE 表、聊天模板
+python scripts/colab_kernel.py --all                 # 生成全部现役 notebook（会话在跑时别重跑）
+
+# 可选：Colab-yoga 协同（旧子命令名 easycolab 仍可用）
+python scripts/colab_cli.py yoga [gui | wake | status | stop]
+
+# 后备轨道与账单（浏览器标签页，零 OAuth）
+python scripts/colab_meter.py status                 # 云端账本 + 当前分配
+python scripts/colab_meter.py stop --all             # 强杀并打印双轨账单
+python scripts/colab_sync.py --release-all           # 强杀全部活动实例并核验
+
+# 测试
+cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
+```
+
+---
+
+## 4. 同核双轨、保活与 Colab-yoga 协同
+
+`scripts/colab_kernel.py` 生成同一份首格代码，供无头 CLI（Track A）与网页版（Track B）共用。
+
+| 轨道 | 角色 | 适用场景 |
+|---|---|---|
+| **Track A · 官方 Colab CLI + 30s 内核心跳** | **主力（日常默认）** | 终端无头起停任意现役或归档模型；自带心跳防 21–35 分钟回收 + 45 分钟空闲自停 |
+| **Colab-yoga 协同工作台**（可选） | 多模态共驻 | 本地托盘 App 与 Track A 双向复用同一台 G4（共用 `~/.config/colab-cli/` 的令牌与会话） |
+| **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | 备用与兜底 | ① 网页首格按钮与第 4 格免释放热切换模型；② CLI OAuth 异常时复用已登录 Edge；③ 强杀 CLI 无法按名停止的 `[?]` 幽灵会话 |
+
+- **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli` 0.7.5 创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一行 `colab exec` 心跳，每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
+- **Colab-yoga**（[github.com/incredible404-rgb/Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)）：安装到 `%LOCALAPPDATA%\Programs\Colab-yoga`（含 `Colab-yoga.exe`、`runtime\python.exe`、`bridge\colab_yoga_bridge.py`）。找不到时 `colab_cli.py yoga ...` 会报出安装位置与下载地址。`colab_kernel.py` 生成时把各现役模型的无头首格导出为 `Colab-yoga\colab_kernel_runners.json`（目录不存在则跳过并提示）。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都经 `~/.config/colab-cli/sessions.json` 复用同一台 G4，不重复开卡；Colab-yoga 只清理 `18080..18999` 端口进程，不会误杀 `:8081` 的 `llama-server`。
+
+---
+
+## 5. 模型清单与新增/归档流程
+
+模型声明字典分置两处，清单以 `python scripts/colab_kernel.py --list` 为准：
+
+- **现役表 `MODELS`（[`scripts/colab_kernel.py`](scripts/colab_kernel.py)）**：`--all` 生成、热切换下拉框与 `--sync-magpie` 暴露的唯一来源。
+- **归档表 `ARCHIVED_MODELS`（[`scripts/archived_models.py`](scripts/archived_models.py)）**：保留完整声明，共用最新内核；不进暴露列表，但可按 slug 单独生成或启动。
+
+现役模型（规格、显存布局与实测见各自的参考文档）：
+
+| slug | 服务端 `alias` | 参考文档 |
+|---|---|---|
+| `qwen38-huihui-v2`（默认） | `Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL` | [`qwen38-flash-next-huihui-v2-g4.md`](references/qwen38-flash-next-huihui-v2-g4.md) |
+| `gemma4-31b` | `Gemma-4-31B-it-ARA-Heretic-Q8_0` | [`gemma4-31b-g4.md`](references/gemma4-31b-g4.md) |
+| `qwen38-27b-rvn` | `Qwen3.8-27B-RVN-Heretic-BF16` | [`qwen38-27b-rvn-g4.md`](references/qwen38-27b-rvn-g4.md) |
+| `glm53-flash` | `GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4` | [`glm53-flash-g4.md`](references/glm53-flash-g4.md) |
+
+归档：`qwen38-fn`、`qwen38-fn-nl`、`qwen35-122b`、`nemotron-120b`、`gemma4-31b-ortenzya`。
+
+### A. 新增模型四步法（先探测 → 声明 → 单测 → 分发）
+
+1. **HF 预检（必做，零盲猜）**：`python scripts/colab_kernel.py --probe-hf <hf_repo_id> [revision]`。它查询 HF API 并 Range 读取每个 `.gguf` 前 16 MiB，输出固定 `rev`、精确字节数、LFS `sha256`、张量数 `n_tensors`、是否含 `per_layer_token_embd.weight`（PLE 表）与 `tokenizer.chat_template`。核对三条硬边界：
+   - **显存红线（G4 物理显存 `95.6 GiB` / `97,887 MiB`）**：含 PLE 表的模型用总权重减去 PLE 分片（CPU mmap 常驻 `/dev/shm`）得**纯 GPU 主干**；纯 GPU 主干 + `mmproj` + `MTP` + 262k KV 须 `≤ 92 GiB`。含 PLE 的分片设为 `ple_shard_name` 且 `priority: 1`。超大 MoE 用 `extra_server_flags: ['--n-cpu-moe', '<层数>']` 把前 N 层路由专家分流到 176 GiB 主机内存，使进显存部分控制在 `80–85 GiB`。
+   - **MTP 草稿头红线**：`llama-server --model-draft` 把草稿文件当独立模型加载，草稿 GGUF 必须带齐 `token_embd.weight` 与 `output_norm.weight`（用 `--probe-hf` 看 `n_tensors`，不要用缺张量的精简草稿头）。
+   - **模板族（`template_family`）与转义红线**：`'qwen38_fn'`（Qwen3.8-Flash-Next 与 27B，自动剥离 Unsloth 注入的 `high -> xhigh` 折合再打四档中文思考补丁）、`'gemma4'`（Gemma 4 Canonical 模板，`enable_thinking` 默认改 true）、`'glm5_next'` / `'qwen35'` / `'nemotron'`。在 `colab_kernel.py` 的 `oneclick_code = f"""..."""` 里新增模板匹配字符串时，Jinja 里的 `\n` 必须写成 **4 个反斜杠 `\\\\n`**。
+2. **登记进 `MODELS`**：在 `colab_kernel.py` 的 `MODELS` 新增 `<slug>` 条目，按需新增 7 行薄入口 `scripts/make_<name>_notebook.py` 与 `references/<name>.md`。`drive_key` 由 `generate_one` 自动注册，并从本机 Drive 客户端数据库提取 `cloud_id` 写入 `.secrets.json`，无需手改 `secrets_config.py`。
+3. **跑本地单测**：`cd scripts && python -X utf8 -m unittest discover -p "test_*.py" -v`。套件对 `MODELS` 与 `ARCHIVED_MODELS` 全部条目做 AST 语法检查、生产路径零探针检查、启动指纹自检与模板补丁实跑。
+4. **一键生成并分发**：`python scripts/colab_kernel.py --all`；用 Magpie 网关的再加 `--sync-magpie`（其他人省略）。Colab 会话正在运行时不要重跑生成，以免覆盖云端正在使用的笔记本。
+
+### B. 归档与恢复（单点移动）
+
+- **归档**：把条目从 `MODELS` 剪到 `scripts/archived_models.py` 的 `ARCHIVED_MODELS`，移走对应 `make_*_notebook.py`，再跑 `colab_kernel.py --all`（用 Magpie 则带 `--sync-magpie`，它会把该模型从暴露列表移除并 reset 其配置）。
+- **临时运行归档模型**：不改文件，直接 `python scripts/colab_cli.py start <archived-slug>`。
+- **恢复为现役**：把条目移回 `MODELS`，重跑 `colab_kernel.py --all`。
+
+---
+
+## 6. 评测、网络入口与账单
+
+- **A/B 基准（[`scripts/bench_ab.py`](scripts/bench_ab.py)）**：改参数（MTP 步数、KV 类型、量化、ubatch）时对已在跑的服务执行 `decode`、`recall`（8k/32k/128k/216k 大海捞针）、`tools`（48 次工具调用）与 `compare a.json b.json`。上线门槛：`recall` 全过、`tools` 0 失败。
+- **网络入口**：日常自用走 **Tailscale Service**（`svc:qwen`，仅 tailnet 私网可见，免 `--api-key-file` 以便 WebUI 免密即开即用；经 SOCKS5 反连本机 `:3426` 的 `local_novel_mcp.py` 读写 `$NOVEL_ROOT`），详见 [`references/tailscale-serve.md`](references/tailscale-serve.md)。要暴露公网（Cloudflare Named Tunnel / Funnel）必须启用 `--api-key-file`，详见 [`references/secure-remote-service.md`](references/secure-remote-service.md)。
+- **零 OAuth 查账与幽灵实例强杀**：`colab sessions` 出现 `[?]`（无本地会话名的云端实例）时，`colab_cli.py stop --all` 会自动调用 `colab_sync.py --release-all`，经已登录 Edge 的 `/tun/m/unassign/<endpoint>` 强杀并核验 `0 active / 0.00 CU/h`；也可直接 `colab_meter.py status` / `stop --all` 打印云端账本差值 + 墙钟折算双轨账单。
+
+---
+
+## 7. 故障排查
+
+| 现象 | 原因与处理 |
+|---|---|
+| `missing ... in .secrets.json / environment` | 必填四项（`api_key`、`ts_client_id`、`ts_client_secret`、`tailnet_fqdn`）仍是占位符；回第 2 节填写 |
+| `colab` 找不到，或 `colab sessions` 要求授权 | 重做第 0 节：`uv tool install "google-colab-cli==0.7.5"`，再跑一次 `colab sessions` 完成 OAuth |
+| `Colab-yoga not found at ...` | 未装可选的 Colab-yoga：从其仓库安装，或设 `COLAB_YOGA_DIR` 指向现有安装；核心命令不受影响 |
+| `colab new --gpu G4` 报 `Backend rejected accelerator` | G4 只有单一 176 GiB 规格，传 `--high-mem` 会被拒（`colab_cli.py` 已自动跳过）；也可能是账号无 G4 额度或当日无空闲卡，稍后重试 |
+| 实例 20～35 分钟后无故消失 | 心跳进程没在跑（电脑休眠或进程被杀）；`status` 看心跳计数，`start` / `launch` 才会拉起保活 |
+| `stop --all` 后仍有 active 或 `[?]` | 走第 6 节的强杀：`colab_sync.py --release-all`（需已登录 Google 的 Edge 标签页），再 `colab_meter.py status` 核验 |
+| 域名超时或解析不到 | Service 审批刚生效需几秒到十几秒，重试；确认本机 Tailscale ≥ 1.78 且在同一 tailnet，ACL 含 `autoApprovers.services`（见 `references/tailscale-serve.md`） |
+| 首格报「需要重新启动服务，但缺少上次为扩大提示缓存而删掉的分片副本」 | 配置变更触发重启，再跑一次首格即自动重下被回收的显存专用分片 |
+| 测试失败 | 在 `scripts/` 下跑 `python -X utf8 -m unittest discover -p "test_*.py"`，按失败的模块名定位；改过 `MODELS` 声明多半是 AST/指纹检查在拦 |
