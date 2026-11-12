@@ -289,13 +289,15 @@ python -X utf8 scripts/local_mcp.py stop
 
 首次启动会创建 `~/.config/colab-cli/local-mcp.json`，只在该文件中保存专用随机令牌和 `cwd`；已有配置不会被覆盖。首次工作目录优先取 `LOCAL_MCP_CWD`，兼容 `NOVEL_ROOT` / `novel_root`，未配置时用 `~/Documents/Colab创作`（存在时），否则 `~/Documents`。修改配置后重启桥生效。日志在同目录的 `local-mcp.log`，不记录令牌或命令正文，启动前超过 1 MB 会只保留末尾 256 KB。
 
-`start` 会先检查 Node.js 和全局 `@earendil-works/pi-coding-agent`（`npm i -g`）是否存在，缺一项就报错退出、不写配置。默认只监听 `127.0.0.1:3426`；配置了有效的 `local_tailscale_ip` 时再额外监听 `<local_tailscale_ip>:3426` 供云端隧道连入（Tailscale 未连上时记一行日志，只保留 `127.0.0.1`），不会绑 `0.0.0.0`，因此不暴露到局域网，也不触发 Windows 防火墙弹窗。显式设了 `LOCAL_MCP_HOST` 或传 `start --host <地址>` 时只绑该地址。`colab_cli.py start` 只在配置了 `local_tailscale_ip`（或设 `COLAB_LOCAL_MCP_AUTO=1`）时才顺带拉起本机桥。
+`start` 会先检查 Node.js 和全局 `@earendil-works/pi-coding-agent`（`npm i -g`）是否存在，缺一项就报错退出、不写配置。默认只监听 `127.0.0.1:3426`；配置了有效的 `local_tailscale_ip` 时再额外监听 `<local_tailscale_ip>:3426` 供云端隧道连入（地址尚未就绪时每 15 秒重试，本机监听继续工作），默认不绑定 `0.0.0.0`。显式设了 `LOCAL_MCP_HOST` 或传 `start --host <地址>` 时只绑该地址；后续 `status`、`stop` 也要带相同的 `--host`，或在各次命令中保留相同的环境变量。`colab_cli.py start` 只在配置了 `local_tailscale_ip`（或设 `COLAB_LOCAL_MCP_AUTO=1`）时才顺带拉起本机桥。
 
 设置 `local_tailscale_ip` 后，新生成的 WebUI 默认工具条目名为 `local_mcp`，地址为 `http://127.0.0.1:3426/mcp`，使用云端代理。首次在 WebUI 的客户端私有 MCP 设置中，为该条目添加 `Authorization: Bearer <local-mcp.json 中的 token>`；以后复用浏览器保存的配置。默认条目不带真实令牌：notebook、runner 和可匿名读取的 `/props` 都不能保存它。本机令牌也不用于 llama-server 的 `api_key`。
 
-服务默认监听本机所有网卡的 3426 端口；云端到本机的连接经 Tailscale 加密。`/mcp` 无令牌或令牌错误均返回 401；匿名 `/health` 只报服务身份。启动等待真实就绪，重复或并发启动会复用同一实例；停止要验证该实例的鉴权和 PID，外来端口占用不会被接管。
+云端到本机的连接经 Tailscale 加密。`/mcp` 无令牌或令牌错误均返回 401；匿名 `/health` 只报服务身份。启动等待真实就绪，重复或并发启动会复用同一实例；停止要验证该实例的鉴权和 PID，外来端口占用不会被接管。
 
 Colab CLI 在开始保活时自动启动桥；[Colab-yoga v0.5.0+](https://github.com/incredible404-rgb/Colab-yoga) 在唤醒时启动、活动会话期间每 60 秒检查并恢复，也提供不唤醒 GPU 的「启动」按钮。只有确认账号上没有活动实例后才自动关闭共享桥；账号查询失败时保留它。
+
+更新脚本不会替换已经运行的桥进程。升级后等当前工具调用完成，再执行一次 `stop` 和 `start` 使监听变更生效；无需重启 GPU 或模型。
 
 旧 `local_novel_mcp.py` 保留兼容，但升级前要先关闭它以腾出 3426。旧 `local_novel_fs` 条目、`read_novel_file` 等工具名以及 `skill:名称` 路径不适用于新桥；在私有客户端配置和系统提示中迁移为四个原生工具与真实文件路径。回退时关闭新桥，再运行旧脚本。
 
@@ -306,6 +308,7 @@ cd scripts
 python -X utf8 -m unittest discover -p 'test_*.py'
 node check_local_mcp.mjs <local_mcp.py 的绝对路径>
 python -X utf8 check_local_mcp_concurrency.py <local_mcp.py 的绝对路径>
+python -X utf8 check_local_mcp_bind.py
 ```
 
 ## 仓库目录结构

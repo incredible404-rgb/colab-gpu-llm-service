@@ -110,14 +110,22 @@ class LocalMcpBindAndPrerequisiteTests(unittest.TestCase):
 
     def test_default_bind_is_loopback_plus_the_tailscale_ip(self):
         with mock.patch.object(m, 'tailscale_bind_ip', return_value=''):
-            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '127.0.0.1', 'LOCAL_MCP_EXTRA_HOST': ''})
+            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '', 'LOCAL_MCP_EXTRA_HOST': ''})
         with mock.patch.object(m, 'tailscale_bind_ip', return_value='100.64.0.7'):
-            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '127.0.0.1', 'LOCAL_MCP_EXTRA_HOST': '100.64.0.7'})
+            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '', 'LOCAL_MCP_EXTRA_HOST': '100.64.0.7'})
 
     def test_explicit_host_is_passed_through_alone(self):
         with mock.patch.dict(os.environ, {'LOCAL_MCP_HOST': '0.0.0.0'}), \
                 mock.patch.object(m, 'tailscale_bind_ip', return_value='100.64.0.7'):
             self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '0.0.0.0', 'LOCAL_MCP_EXTRA_HOST': ''})
+
+    def test_control_address_follows_the_bind_and_maps_wildcards_to_loopback(self):
+        for host, expected in (('', '127.0.0.1'), ('0.0.0.0', '127.0.0.1'),
+                               ('::', '::1'), ('::1', '::1'), ('127.0.0.2', '127.0.0.2')):
+            with self.subTest(host=host), mock.patch.dict(os.environ, {'LOCAL_MCP_HOST': host}):
+                self.assertEqual(m.control_host(), expected)
+                authority = '[' + expected + ']' if ':' in expected else expected
+                self.assertEqual(m.url(), 'http://%s:34265/mcp' % authority)
 
     def test_host_flag_sets_the_explicit_bind(self):
         with mock.patch.dict(m._COMMANDS, {'status': lambda: {'ok': True}}), contextlib.redirect_stdout(io.StringIO()):

@@ -68,8 +68,17 @@ def port() -> int:
     return value
 
 
+def control_host() -> str:
+    """Probe the explicitly bound interface; wildcard listeners are reached through loopback."""
+    host = (os.environ.get('LOCAL_MCP_HOST') or '').strip()
+    return {'': _HOST, '0.0.0.0': _HOST, '::': '::1'}.get(host, host)
+
+
 def url() -> str:
-    return 'http://127.0.0.1:%d/mcp' % port()
+    host = control_host()
+    if ':' in host:
+        host = '[' + host + ']'
+    return 'http://%s:%d/mcp' % (host, port())
 
 
 def default_cwd() -> str:
@@ -122,7 +131,8 @@ def listen_env() -> dict:
     explicit = (os.environ.get('LOCAL_MCP_HOST') or '').strip()
     if explicit:
         return {'LOCAL_MCP_HOST': explicit, 'LOCAL_MCP_EXTRA_HOST': ''}
-    return {'LOCAL_MCP_HOST': _HOST, 'LOCAL_MCP_EXTRA_HOST': tailscale_bind_ip()}
+    # An unset host lets Node apply its loopback default and add the configured Tailscale listener.
+    return {'LOCAL_MCP_HOST': '', 'LOCAL_MCP_EXTRA_HOST': tailscale_bind_ip()}
 
 
 def load_config() -> dict:
@@ -180,7 +190,7 @@ def _redact(text: str) -> str:
 
 
 def _request(method: str, path: str, body: dict | None = None, token: str = '', timeout: float = 2.0):
-    conn = http.client.HTTPConnection(_HOST, port(), timeout=timeout)
+    conn = http.client.HTTPConnection(control_host(), port(), timeout=timeout)
     headers = {'Accept': 'application/json'}
     payload = None
     if body is not None:
@@ -503,7 +513,7 @@ _COMMANDS = {'start': start, 'status': status, 'stop': stop}
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] in ('-h', '--help'):
-        sys.stderr.write('usage: python -X utf8 scripts/local_mcp.py {start [--host HOST]|status|stop}\n')
+        sys.stderr.write('usage: python -X utf8 scripts/local_mcp.py {start|status|stop} [--host HOST]\n')
         return 2
     if '--host' in argv[1:]:
         index = argv.index('--host', 1)

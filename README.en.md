@@ -289,13 +289,15 @@ python -X utf8 scripts/local_mcp.py stop
 
 First start creates `~/.config/colab-cli/local-mcp.json` with a dedicated random token and `cwd`; existing choices are preserved. Initial cwd comes from `LOCAL_MCP_CWD`, with `NOVEL_ROOT` / `novel_root` compatibility, then `~/Documents/Colab创作` when it exists, else `~/Documents`. Restart after editing the config. Logs go to neighboring `local-mcp.log`, without tokens or command bodies; a log over 1 MB is cut to its last 256 KB before a start.
 
-`start` first checks for Node.js and the global `@earendil-works/pi-coding-agent` (`npm i -g`) and exits with the reason, writing no config, when either is missing. By default it listens on `127.0.0.1:3426` only; with a valid `local_tailscale_ip` it also listens on `<local_tailscale_ip>:3426` for the cloud tunnel (if Tailscale is not connected it logs one line and keeps `127.0.0.1`). It never binds `0.0.0.0`, so nothing is exposed on the LAN and no Windows firewall prompt appears. An explicit `LOCAL_MCP_HOST` or `start --host <address>` binds exactly that address. `colab_cli.py start` launches the local bridge only when `local_tailscale_ip` is set (or `COLAB_LOCAL_MCP_AUTO=1`).
+`start` first checks for Node.js and the global `@earendil-works/pi-coding-agent` (`npm i -g`) and exits with the reason, writing no config, when either is missing. By default it listens on `127.0.0.1:3426` only; with a valid `local_tailscale_ip` it also listens on `<local_tailscale_ip>:3426` for the cloud tunnel (an unavailable address is retried every 15 seconds while loopback stays available). It does not bind `0.0.0.0` by default. An explicit `LOCAL_MCP_HOST` or `start --host <address>` binds exactly that address; pass the same `--host` to subsequent `status` and `stop` commands, or retain the same environment variable for each command. `colab_cli.py start` launches the local bridge only when `local_tailscale_ip` is set (or `COLAB_LOCAL_MCP_AUTO=1`).
 
 With `local_tailscale_ip` configured, generated WebUI defaults contain a `local_mcp` entry at `http://127.0.0.1:3426/mcp` using the cloud proxy. Once per browser, add `Authorization: Bearer <token from local-mcp.json>` in the client's private MCP settings. The browser retains it. Real tokens never enter notebooks, runners, or anonymous `/props` defaults, and are separate from llama-server's `api_key`.
 
-The service listens on all local adapters on port 3426; the cloud-to-PC link is encrypted by Tailscale. Missing or wrong tokens receive 401 on `/mcp`; anonymous `/health` reveals only identity. Startup waits for readiness and reuses one instance across repeated or concurrent requests. Stop verifies authentication and PID, leaving unrelated port holders alone.
+The cloud-to-PC link is encrypted by Tailscale. Missing or wrong tokens receive 401 on `/mcp`; anonymous `/health` reveals only identity. Startup waits for readiness and reuses one instance across repeated or concurrent requests. Stop verifies authentication and PID, leaving unrelated port holders alone.
 
 Colab CLI starts the bridge with keepalive. [Colab-yoga v0.5.0+](https://github.com/incredible404-rgb/Colab-yoga) starts it on wake, checks and recovers it every 60 seconds during an active session, and offers a manual **Start** button that does not wake a GPU. Automatic shutdown requires confirmation that the account has no active assignments; failed account checks leave the shared bridge running.
+
+Updating scripts does not replace an already running bridge process. After upgrading, finish any active tool call, then run `stop` followed by `start` once to apply the listener changes. No GPU or model restart is needed.
 
 The old `local_novel_mcp.py` remains available. Stop it before upgrading to free port 3426. Replace old `local_novel_fs` entries, `read_novel_file`-style tool names, and `skill:name` paths with the four native tools and real file paths in private client settings and prompts. To roll back, stop the new bridge and run the legacy script.
 
@@ -306,6 +308,7 @@ cd scripts
 python -X utf8 -m unittest discover -p 'test_*.py'
 node check_local_mcp.mjs <absolute-path-to-local_mcp.py>
 python -X utf8 check_local_mcp_concurrency.py <absolute-path-to-local_mcp.py>
+python -X utf8 check_local_mcp_bind.py
 ```
 
 ## Repository layout
