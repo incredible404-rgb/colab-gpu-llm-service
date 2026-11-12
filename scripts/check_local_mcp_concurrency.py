@@ -13,7 +13,7 @@ launcher = Path(sys.argv[1])
 with tempfile.TemporaryDirectory(prefix='local-mcp-concurrent-') as tmp:
     root = Path(tmp)
     config = root / 'config.json'
-    config.write_text(json.dumps({'token': secrets.token_urlsafe(32), 'cwd': str(root)}), encoding='utf-8')
+    config.write_text(json.dumps({'token': secrets.token_urlsafe(32), 'cwd': str(root)}), encoding='utf-8', newline='\n')
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]

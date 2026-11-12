@@ -61,9 +61,15 @@ class RunnersExportTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'COLAB_YOGA_DIR': 'X:/yoga'}):
             self.assertEqual(ck.yoga_runners_path(), Path('X:/yoga') / 'colab_kernel_runners.json')
 
-    def test_default_path_is_colab_yoga_only(self):
+    def test_default_path_is_the_per_user_colab_yoga_dir(self):
         env = {k: v for k, v in os.environ.items() if k != 'COLAB_YOGA_DIR'}
         env['LOCALAPPDATA'] = 'C:/Users/u/AppData/Local'
+        with mock.patch.dict(os.environ, env, clear=True):
+            p = ck.yoga_runners_path()
+        self.assertEqual(p, Path('C:/Users/u/AppData/Local') / 'Colab-yoga' / 'colab_kernel_runners.json')
+
+    def test_without_localappdata_the_install_dir_is_the_fallback(self):
+        env = {k: v for k, v in os.environ.items() if k not in ('COLAB_YOGA_DIR', 'LOCALAPPDATA')}
         with mock.patch.dict(os.environ, env, clear=True):
             p = ck.yoga_runners_path()
         self.assertEqual(p.parts[-3:], ('Programs', 'Colab-yoga', 'colab_kernel_runners.json'))
@@ -90,6 +96,108 @@ class RunnersExportTests(unittest.TestCase):
             self.assertEqual(item['alias'], ck.MODELS[slug]['alias'])
             self.assertTrue(item['code'])
         self.assertIn('Colab-yoga runners', buf.getvalue())
+
+
+class ZeroConfigExportTests(unittest.TestCase):
+    """Default export into %LOCALAPPDATA%/Colab-yoga; LOCALAPPDATA always points at a temp dir here."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.local = Path(self.tmp.name) / 'Local'
+        env = {k: v for k, v in os.environ.items() if k != 'COLAB_YOGA_DIR'}
+        env['LOCALAPPDATA'] = str(self.local)
+        self.env = mock.patch.dict(os.environ, env, clear=True)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _export(self, config=CFG):
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            result = ck.export_yoga_runners(config)
+        return result, out.getvalue()
+
+    def test_creates_the_data_dir_and_writes_runners_and_bridge(self):
+        result, out = self._export()
+        data_dir = self.local / 'Colab-yoga'
+        self.assertTrue(result)
+        self.assertEqual(list(json.loads((data_dir / 'colab_kernel_runners.json').read_text(encoding='utf-8'))),
+                         list(ck.MODELS))
+        bridge = json.loads((data_dir / 'local_mcp_bridge.json').read_text(encoding='utf-8'))
+        self.assertEqual(Path(bridge['script']), Path(ck.__file__).resolve().with_name('local_mcp.py'))
+        self.assertTrue(Path(bridge['script']).is_file())
+        self.assertIn('Exported Colab-yoga runners to:', out)
+
+    def test_placeholders_create_nothing(self):
+        result, _ = self._export({**CFG, 'api_key': '<YOUR_LLAMA_API_KEY>'})
+        self.assertFalse(result)
+        self.assertFalse((self.local / 'Colab-yoga').exists())
+
+    def test_stale_copies_in_the_install_dir_and_app_dir_are_refreshed(self):
+        programs = self.local / 'Programs' / 'Colab-yoga'
+        programs.mkdir(parents=True)
+        (programs / 'colab_kernel_runners.json').write_text('{}', encoding='utf-8')
+        portable = Path(self.tmp.name) / 'portable'
+        portable.mkdir()
+        (portable / 'colab_kernel_runners.json').write_text('{}', encoding='utf-8')
+        (self.local / 'Colab-yoga').mkdir(parents=True)
+        (self.local / 'Colab-yoga' / 'install.json').write_text(json.dumps({'appDir': str(portable)}), encoding='utf-8')
+        self.assertTrue(self._export()[0])
+        primary = (self.local / 'Colab-yoga' / 'colab_kernel_runners.json').read_text(encoding='utf-8')
+        self.assertEqual((programs / 'colab_kernel_runners.json').read_text(encoding='utf-8'), primary)
+        self.assertEqual((portable / 'colab_kernel_runners.json').read_text(encoding='utf-8'), primary)
+        self.assertFalse((programs / 'local_mcp_bridge.json').exists())
+
+    def test_app_dir_and_install_dir_without_an_old_copy_are_left_alone(self):
+        programs = self.local / 'Programs' / 'Colab-yoga'
+        programs.mkdir(parents=True)
+        portable = Path(self.tmp.name) / 'portable'
+        portable.mkdir()
+        (self.local / 'Colab-yoga').mkdir(parents=True)
+        (self.local / 'Colab-yoga' / 'install.json').write_text(json.dumps({'appDir': str(portable)}), encoding='utf-8')
+        self.assertTrue(self._export()[0])
+        self.assertEqual(list(portable.iterdir()), [])
+        self.assertEqual(list(programs.iterdir()), [])
+
+    def test_colab_yoga_dir_is_created_and_skips_other_copies(self):
+        target = Path(self.tmp.name) / 'unzipped' / 'Colab-yoga'
+        programs = self.local / 'Programs' / 'Colab-yoga'
+        programs.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {'COLAB_YOGA_DIR': str(target)}):
+            self.assertTrue(self._export()[0])
+        self.assertTrue((target / 'colab_kernel_runners.json').is_file())
+        self.assertTrue((target / 'local_mcp_bridge.json').is_file())
+        self.assertFalse((programs / 'colab_kernel_runners.json').exists())
+        self.assertFalse((self.local / 'Colab-yoga').exists())
+
+
+class ResolveYogaDirTests(unittest.TestCase):
+    def _resolve(self, local, **extra):
+        env = {k: v for k, v in os.environ.items() if k != 'COLAB_YOGA_DIR'}
+        env.update(LOCALAPPDATA=str(local), **extra)
+        with mock.patch.dict(os.environ, env, clear=True):
+            return colab_cli.resolve_yoga_dir()
+
+    def test_order_env_then_install_json_then_programs(self):
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td) / 'Local'
+            self.assertEqual(self._resolve(local), local / 'Programs' / 'Colab-yoga')
+            portable = Path(td) / 'anywhere'
+            (local / 'Colab-yoga').mkdir(parents=True)
+            (local / 'Colab-yoga' / 'install.json').write_text(json.dumps({'appDir': str(portable)}), encoding='utf-8')
+            self.assertEqual(self._resolve(local), local / 'Programs' / 'Colab-yoga')  # no bridge there yet
+            (portable / 'bridge').mkdir(parents=True)
+            (portable / 'bridge' / 'colab_yoga_bridge.py').write_text('', encoding='utf-8')
+            self.assertEqual(self._resolve(local), portable)
+            self.assertEqual(self._resolve(local, COLAB_YOGA_DIR='X:/yoga'), Path('X:/yoga'))
+
+    def test_broken_install_json_falls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            local = Path(td)
+            (local / 'Colab-yoga').mkdir()
+            (local / 'Colab-yoga' / 'install.json').write_text('not json', encoding='utf-8')
+            self.assertEqual(self._resolve(local), local / 'Programs' / 'Colab-yoga')
 
 
 if __name__ == '__main__':

@@ -18,6 +18,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
+import { isIPv4 } from 'node:net';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -25,7 +26,7 @@ import { pathToFileURL } from 'node:url';
 const SERVER_NAME = 'local_mcp';
 const SERVER_VERSION = '1.0.0';
 const DEFAULT_PORT = 3426;
-const DEFAULT_HOST = '0.0.0.0';
+const DEFAULT_HOST = '127.0.0.1';
 // A tools/call argument carries a file body (write) or an edit batch, so the default 1 MiB is too small.
 const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const SUPPORTED_PROTOCOLS = ['2025-06-18', '2025-03-26', '2024-11-05'];
@@ -278,7 +279,17 @@ function serve({ token, cwd, tools, validateToolArguments, piVersion }) {
 	const descriptors = toolDescriptors(tools);
 	const sessions = new Map();
 	const port = Number(process.env.LOCAL_MCP_PORT || DEFAULT_PORT);
-	const host = process.env.LOCAL_MCP_HOST || DEFAULT_HOST;
+	// An explicit --host / LOCAL_MCP_HOST binds exactly that. Otherwise 127.0.0.1, plus the Tailscale IP the
+	// launcher passes as LOCAL_MCP_EXTRA_HOST (or LOCAL_TAILSCALE_IP when run directly) so the cloud tunnel
+	// reaches it without exposing the bridge on the LAN.
+	const hostFlag = process.argv.indexOf('--host');
+	const explicitHost = (hostFlag > 1 ? process.argv[hostFlag + 1] : '') || process.env.LOCAL_MCP_HOST || '';
+	const host = explicitHost || DEFAULT_HOST;
+	const extraCandidate = explicitHost
+		? ''
+		: (process.env.LOCAL_MCP_EXTRA_HOST ?? process.env.LOCAL_TAILSCALE_IP ?? '').trim();
+	const extraHost =
+		isIPv4(extraCandidate) && !['127.0.0.1', '0.0.0.0', host].includes(extraCandidate) ? extraCandidate : '';
 	if (!Number.isInteger(port) || port <= 0 || port > 65535) fatal(`invalid LOCAL_MCP_PORT ${process.env.LOCAL_MCP_PORT}`);
 
 	const instructions =
@@ -407,7 +418,7 @@ function serve({ token, cwd, tools, validateToolArguments, piVersion }) {
 		return id;
 	}
 
-	const server = createServer(async (req, res) => {
+	const handleRequest = async (req, res) => {
 		let url;
 		try {
 			url = new URL(req.url || '/', 'http://localhost');
@@ -521,7 +532,11 @@ function serve({ token, cwd, tools, validateToolArguments, piVersion }) {
 			return;
 		}
 		send(res, 200, response, requestHeaders());
-	});
+	};
+	const server = createServer(handleRequest);
+	const servers = [server];
+	let stopping = false;
+	let extraRetryTimer = null;
 
 	server.on('error', (err) => {
 		if (err.code === 'EADDRINUSE') {
@@ -534,11 +549,42 @@ function serve({ token, cwd, tools, validateToolArguments, piVersion }) {
 	server.listen(port, host, () => {
 		logLine(`listening on http://${host}:${port}/mcp (cwd=${cwd}, pi=${piVersion}, pid=${process.pid}, ` +
 			`tools=${[...tools.keys()].join(',')})`);
+		if (!extraHost) return;
+		let loggedMissing = false;
+		const tryListenExtra = () => {
+			if (stopping) return;
+			const extra = createServer(handleRequest);
+			extra.keepAliveTimeout = server.keepAliveTimeout;
+			extra.headersTimeout = server.headersTimeout;
+			extra.on('error', (err) => {
+				if (servers.includes(extra)) servers.splice(servers.indexOf(extra), 1);
+				if (stopping) return;
+				const retryable = err.code === 'EADDRNOTAVAIL';
+				if (!loggedMissing) {
+					const why = retryable ? 'address not available yet (will retry every 15s until Tailscale is up)' : err.code || err.message;
+					logLine(`extra listener ${extraHost}:${port} not started: ${why}; still serving ${host}:${port}`);
+					loggedMissing = true;
+				}
+				try { extra.close(); } catch {}
+				if (retryable) {
+					extraRetryTimer = setTimeout(tryListenExtra, 15000);
+					extraRetryTimer.unref();
+				}
+			});
+			extra.listen(port, extraHost, () => {
+				servers.push(extra);
+				logLine(`also listening on http://${extraHost}:${port}/mcp`);
+			});
+		};
+		tryListenExtra();
 	});
 
 	const shutdown = (signal) => {
+		stopping = true;
+		if (extraRetryTimer) clearTimeout(extraRetryTimer);
 		logLine(`stopping on ${signal}`);
-		server.close(() => process.exit(0));
+		let open = servers.length;
+		for (const each of servers) each.close(() => --open === 0 && process.exit(0));
 		// A hung connection must not keep the process alive; the launcher waits for the port to close.
 		setTimeout(() => process.exit(0), 2000).unref();
 	};

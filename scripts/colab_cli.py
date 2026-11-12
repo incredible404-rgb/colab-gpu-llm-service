@@ -91,6 +91,8 @@ CLI_DIR = Path.home() / '.config/colab-cli'
 CLI_PYTHONW = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'uv/tools/google-colab-cli/Scripts/pythonw.exe'
 CLI_PYTHON = CLI_PYTHONW.with_name('python.exe')  # same venv, with a console (stdout is read)
 KEEPALIVE = Path(__file__).with_name('colab_keepalive.py')
+# local_mcp.py: the Pi-native read/write/edit/bash bridge this CLI starts and stops with a GPU session.
+# local_novel_mcp.py: the standalone novel-folder tool server, run by hand; this CLI never launches it.
 LOCAL_MCP = Path(__file__).with_name('local_mcp.py')
 # Not exported by subprocess on every Python build. Win32 CREATE_BREAKAWAY_FROM_JOB.
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
@@ -269,11 +271,20 @@ def local_mcp(*args: str, timeout: float = 30.0) -> dict:
 def start_novel_mcp() -> None:
     """Start the local MCP bridge when a GPU session starts, if it is not already serving.
 
-    The launcher waits for the port to answer (up to ~8 s) before reporting success, and reports a port
-    conflict instead of taking over a service it does not own. A failure never aborts the GPU run.
+    Skipped silently unless a valid local_tailscale_ip is configured (or COLAB_LOCAL_MCP_AUTO=1). The launcher
+    waits for the port to answer (up to ~8 s) before reporting success, and reports a port conflict instead of
+    taking over a service it does not own. A failure never aborts the GPU run.
     """
     if not LOCAL_MCP.is_file():
         return
+    if os.environ.get('COLAB_LOCAL_MCP_AUTO') != '1':
+        try:
+            from local_mcp import tailscale_bind_ip
+            reachable = bool(tailscale_bind_ip())
+        except Exception:
+            reachable = False
+        if not reachable:
+            return  # no local_tailscale_ip: the cloud runtime could not reach the bridge anyway
     result = local_mcp('start')
     if result.get('ok'):
         print('[colab_cli] local_mcp %s (%s)' % ('started' if result.get('started') else 'already running',
@@ -939,10 +950,27 @@ def cmd_stop(names: list[str]):
     return 0 if u['active'] == 0 else 1
 
 
-_PROGRAMS = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'Programs'
-# Colab-yoga (https://github.com/incredible404-rgb/Colab-yoga) installs to %LOCALAPPDATA%/Programs/Colab-yoga;
-# COLAB_YOGA_DIR overrides the location for portable or custom installs.
-YOGA_DIR = Path(os.environ.get('COLAB_YOGA_DIR') or (_PROGRAMS / 'Colab-yoga'))
+def resolve_yoga_dir() -> Path:
+    """Colab-yoga (https://github.com/incredible404-rgb/Colab-yoga) app dir, first match wins.
+
+    1) COLAB_YOGA_DIR; 2) "appDir" of %LOCALAPPDATA%/Colab-yoga/install.json when it holds
+    bridge/colab_yoga_bridge.py (portable build unzipped anywhere); 3) %LOCALAPPDATA%/Programs/Colab-yoga.
+    """
+    env = os.environ.get('COLAB_YOGA_DIR')
+    if env:
+        return Path(env)
+    local = Path(os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData/Local'))
+    try:
+        app_dir = json.loads((local / 'Colab-yoga' / 'install.json').read_text(encoding='utf-8')).get('appDir')
+    except (OSError, ValueError, AttributeError):
+        app_dir = None
+    if isinstance(app_dir, str) and app_dir.strip() and (Path(app_dir) / 'bridge/colab_yoga_bridge.py').is_file():
+        return Path(app_dir)
+    return local / 'Programs' / 'Colab-yoga'
+
+
+# Resolved once at import; tests patch YOGA_DIR / YOGA_EXE / YOGA_PY / YOGA_BRIDGE directly.
+YOGA_DIR = resolve_yoga_dir()
 YOGA_EXE = YOGA_DIR / 'Colab-yoga.exe'
 YOGA_PY = YOGA_DIR / 'runtime/python.exe'
 YOGA_BRIDGE = YOGA_DIR / 'bridge/colab_yoga_bridge.py'

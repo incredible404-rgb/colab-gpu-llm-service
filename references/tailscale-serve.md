@@ -11,6 +11,8 @@ Service 名默认是 `qwen`。想用别的名字，在 `.secrets.json` 里设 `s
 
 ## 一次性配置（管理台，四步）
 
+> Tailscale Services 目前是 beta 功能：先在 Admin Console 的 Services 页面（`admin/services`）启用它，才能建 `svc:qwen`。
+
 1. **DNS 设置里开两项**（`admin/dns`）：开启 **MagicDNS**；在 HTTPS Certificates 区块点 **Enable HTTPS**，
    并确认 tailnet 域名（`<tailnet>.ts.net`）已显示。少了这两项，Service 域名解析不到或 HTTPS 证书拿不到。
 

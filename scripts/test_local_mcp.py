@@ -85,6 +85,105 @@ class LocalMcpLifecycleTests(unittest.TestCase):
         self.assertNotIn('test-only-owned-bridge-token', out.getvalue())
 
 
+class LocalMcpBindAndPrerequisiteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='local-mcp-unit-')
+        self.root = Path(self.tmp.name)
+        self.path = self.root / 'config.json'
+        env = {k: v for k, v in os.environ.items() if k not in ('LOCAL_MCP_HOST', 'LOCAL_TAILSCALE_IP')}
+        env.update(LOCAL_MCP_CONFIG=str(self.path), LOCAL_MCP_PORT='34265', LOCAL_MCP_LOG=str(self.root / 'log.txt'))
+        self.env = mock.patch.dict(os.environ, env, clear=True)
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def _ip(self, value):
+        with mock.patch('secrets_config.optional_setting', return_value=value):
+            return m.tailscale_bind_ip()
+
+    def test_only_a_real_ipv4_counts_as_a_tailscale_address(self):
+        self.assertEqual(self._ip('100.64.0.7'), '100.64.0.7')
+        for value in ('', '<YOUR_LOCAL_TAILSCALE_IP>', '127.0.0.1', '0.0.0.0', 'host.ts.net'):
+            self.assertEqual(self._ip(value), '', value)
+
+    def test_default_bind_is_loopback_plus_the_tailscale_ip(self):
+        with mock.patch.object(m, 'tailscale_bind_ip', return_value=''):
+            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '127.0.0.1', 'LOCAL_MCP_EXTRA_HOST': ''})
+        with mock.patch.object(m, 'tailscale_bind_ip', return_value='100.64.0.7'):
+            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '127.0.0.1', 'LOCAL_MCP_EXTRA_HOST': '100.64.0.7'})
+
+    def test_explicit_host_is_passed_through_alone(self):
+        with mock.patch.dict(os.environ, {'LOCAL_MCP_HOST': '0.0.0.0'}), \
+                mock.patch.object(m, 'tailscale_bind_ip', return_value='100.64.0.7'):
+            self.assertEqual(m.listen_env(), {'LOCAL_MCP_HOST': '0.0.0.0', 'LOCAL_MCP_EXTRA_HOST': ''})
+
+    def test_host_flag_sets_the_explicit_bind(self):
+        with mock.patch.dict(m._COMMANDS, {'status': lambda: {'ok': True}}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.main(['status', '--host', '0.0.0.0']), 0)
+        self.assertEqual(os.environ.get('LOCAL_MCP_HOST'), '0.0.0.0')
+
+    def test_missing_pi_fails_before_any_config_is_written(self):
+        out = io.StringIO()
+        with mock.patch.object(m, 'probe', return_value=None), mock.patch.object(m, '_node', return_value='node'), \
+                mock.patch.object(m, '_pi_dir', side_effect=SystemExit('@earendil-works/pi-coding-agent not found')), \
+                mock.patch.object(m.subprocess, 'Popen') as spawn, contextlib.redirect_stdout(out):
+            self.assertEqual(m.main(['start']), 1)
+        spawn.assert_not_called()
+        self.assertFalse(self.path.exists())
+        self.assertIn('pi-coding-agent not found', json.loads(out.getvalue())['error'])
+
+    def test_missing_node_fails_before_any_config_is_written(self):
+        with mock.patch.object(m, 'probe', return_value=None), mock.patch.object(m.shutil, 'which', return_value=None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(m.main(['start']), 1)
+        self.assertFalse(self.path.exists())
+
+    def test_pi_dir_honours_the_explicit_root(self):
+        pkg = self.root / 'pi'
+        pkg.mkdir()
+        (pkg / 'package.json').write_text('{}', encoding='utf-8')
+        with mock.patch.dict(os.environ, {'LOCAL_MCP_PI_ROOT': str(pkg)}):
+            self.assertEqual(m._pi_dir(str(self.root / 'node.exe')), pkg)
+
+    def test_large_log_keeps_only_its_tail(self):
+        log = self.root / 'log.txt'
+        log.write_bytes(b'old line\n' * 200_000)  # ~1.8 MB
+        m._rotate_log()
+        self.assertLessEqual(log.stat().st_size, m.LOG_KEEP_BYTES)
+        self.assertTrue(log.read_bytes().startswith(b'old line\n'))
+        small = b'small\n' * 10
+        log.write_bytes(small)
+        m._rotate_log()
+        self.assertEqual(log.read_bytes(), small)
+
+
+class StartBridgeOnDemandTests(unittest.TestCase):
+    def _start(self, ip, auto=None):
+        env = {k: v for k, v in os.environ.items() if k != 'COLAB_LOCAL_MCP_AUTO'}
+        if auto is not None:
+            env['COLAB_LOCAL_MCP_AUTO'] = auto
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m, 'tailscale_bind_ip', return_value=ip), \
+                mock.patch.object(cli, 'local_mcp', return_value={'ok': True, 'started': True, 'url': 'u'}) as helper, \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            cli.start_novel_mcp()
+        return helper, out.getvalue()
+
+    def test_without_a_tailscale_ip_nothing_starts_or_prints(self):
+        helper, out = self._start('')
+        helper.assert_not_called()
+        self.assertEqual(out, '')
+
+    def test_with_a_tailscale_ip_the_bridge_starts(self):
+        helper, _ = self._start('100.64.0.7')
+        helper.assert_called_once_with('start')
+
+    def test_auto_flag_starts_without_a_tailscale_ip(self):
+        helper, _ = self._start('', auto='1')
+        helper.assert_called_once_with('start')
+
+
 class SharedBridgeCleanupTests(unittest.TestCase):
     def test_another_gpu_assignment_keeps_the_shared_bridge(self):
         with mock.patch.object(cli, 'usage', return_value={'active': 1}), mock.patch.object(cli, 'local_mcp') as helper:

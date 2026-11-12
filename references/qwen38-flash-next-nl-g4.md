@@ -34,6 +34,6 @@
 - 创意写作的 MTP 接受率约 0.50–0.53（平均接受 2.2–2.3 个 token），代码类更高。
 - 写作质量的盲比还没做，留给本人体感判断。
 
-## 留存与退役
+## 归档状态
 
-本人体感不如现版或更差，就从 `MODELS` 删掉本条目与 `make_g4_fn_nl_notebook.py`，Magpie 同步去掉该模型名。体感更好就可以把它定为默认，现版留作回退。
+本条目已归档：声明在 `scripts/archived_models.py`（`qwen38-fn-nl`），不在现役 `MODELS` 里，也不导出到 Colab-yoga runners。`notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb` 是最后一次生成的脱敏版；需要复用时用 `python -X utf8 scripts/colab_kernel.py qwen38-fn-nl` 在最新内核上按名重新生成。写作质量的盲比未做，上表数字只代表速度与检索。

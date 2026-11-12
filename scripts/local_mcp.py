@@ -33,6 +33,10 @@ STOP_TIMEOUT = 5.0
 TOKEN_BYTES = 32
 
 _HOST = '127.0.0.1'
+LOG_MAX_BYTES = 1024 * 1024  # rotate local-mcp.log before a start once it grows past this
+LOG_KEEP_BYTES = 256 * 1024  # ... keeping only this much of its tail
+PI_PACKAGE = ('@earendil-works', 'pi-coding-agent')
+_NOT_AN_ADDRESS = ('127.0.0.1', '0.0.0.0')
 
 
 def config_path() -> Path:
@@ -69,7 +73,7 @@ def url() -> str:
 
 
 def default_cwd() -> str:
-    """Initial cwd: explicit LOCAL_MCP_CWD, compatible novel_root, then an existing Documents folder.
+    """Initial cwd: explicit LOCAL_MCP_CWD, compatible novel_root, then ~/Documents/Colab创作, ~/Documents, ~.
 
     This is a default location; tools also accept absolute paths with the current user's full rights.
     """
@@ -83,10 +87,42 @@ def default_cwd() -> str:
             configured = ''
     if configured:
         return str(Path(configured).expanduser().resolve())
-    for path in (Path.home() / 'Documents/colab-novel', Path.home() / 'Documents', Path.home()):
+    for path in (Path.home() / 'Documents' / 'Colab\u521b\u4f5c', Path.home() / 'Documents', Path.home()):
         if path.is_dir():
             return str(path.resolve())
     return str(Path.home())
+
+
+def tailscale_bind_ip() -> str:
+    """local_tailscale_ip (.secrets.json, then LOCAL_TAILSCALE_IP) when it is a real IPv4 address, else ''.
+
+    Unset, a <YOUR_...> placeholder, 127.0.0.1 and 0.0.0.0 all count as "not configured".
+    """
+    import ipaddress
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from secrets_config import optional_setting
+        value = optional_setting('local_tailscale_ip', 'LOCAL_TAILSCALE_IP')
+    except Exception:
+        value = (os.environ.get('LOCAL_TAILSCALE_IP') or '').strip()
+    try:
+        address = str(ipaddress.IPv4Address(value))
+    except ValueError:
+        return ''
+    return '' if address in _NOT_AN_ADDRESS else address
+
+
+def listen_env() -> dict:
+    """Bind settings handed to local_mcp.mjs.
+
+    An explicit LOCAL_MCP_HOST (or `start --host`) is passed through unchanged. Otherwise the server binds
+    127.0.0.1 and, when tailscale_bind_ip() is set, also <local_tailscale_ip> (LOCAL_MCP_EXTRA_HOST), so the
+    bridge is never exposed on every interface by default.
+    """
+    explicit = (os.environ.get('LOCAL_MCP_HOST') or '').strip()
+    if explicit:
+        return {'LOCAL_MCP_HOST': explicit, 'LOCAL_MCP_EXTRA_HOST': ''}
+    return {'LOCAL_MCP_HOST': _HOST, 'LOCAL_MCP_EXTRA_HOST': tailscale_bind_ip()}
 
 
 def load_config() -> dict:
@@ -107,7 +143,7 @@ def _write_config(data: dict) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.tmp')
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='\n')
     try:
         os.chmod(tmp, 0o600)
     except OSError:
@@ -229,6 +265,45 @@ def _node() -> str:
     return found
 
 
+def _pi_dir(node: str) -> Path:
+    """The global Pi coding agent package, searched like local_mcp.mjs does; SystemExit with a hint if absent."""
+    candidates = []
+    explicit = (os.environ.get('LOCAL_MCP_PI_ROOT') or '').strip()
+    if explicit:
+        candidates.append(Path(explicit))
+    roots = []
+    if os.name == 'nt':
+        roots.append(Path(os.environ.get('APPDATA') or Path.home() / 'AppData/Roaming') / 'npm/node_modules')
+        roots.append(Path(node).resolve().parent / 'node_modules')
+    else:
+        if os.environ.get('npm_config_prefix'):
+            roots.append(Path(os.environ['npm_config_prefix']) / 'lib/node_modules')
+        roots += [Path('/usr/local/lib/node_modules'), Path('/usr/lib/node_modules'),
+                  Path.home() / '.npm-global/lib/node_modules']
+    roots += [Path(entry) for entry in (os.environ.get('NODE_PATH') or '').split(os.pathsep) if entry]
+    candidates += [root.joinpath(*PI_PACKAGE) for root in roots]
+    for directory in candidates:
+        if (directory / 'package.json').is_file():
+            return directory
+    raise SystemExit('%s not found (install it with "npm i -g %s" or set LOCAL_MCP_PI_ROOT)'
+                     % ('/'.join(PI_PACKAGE), '/'.join(PI_PACKAGE)))
+
+
+def _rotate_log() -> None:
+    """Keep the last LOG_KEEP_BYTES (from a line start) once the log passes LOG_MAX_BYTES."""
+    path = log_path()
+    try:
+        if path.stat().st_size <= LOG_MAX_BYTES:
+            return
+        with path.open('rb') as handle:
+            handle.seek(-LOG_KEEP_BYTES, os.SEEK_END)
+            tail = handle.read()
+        newline = tail.find(b'\n')
+        path.write_bytes(tail[newline + 1:] if newline >= 0 else tail)
+    except OSError:
+        pass
+
+
 @contextmanager
 def _lifecycle_lock():
     """The button and keeper share one port and token; serialize config creation, start and stop.
@@ -311,13 +386,16 @@ def _start() -> dict:
                 'error': 'local_mcp answers on port %d but rejects an initialize request (HTTP %s); '
                          'see %s' % (port(), status or 'timeout', log_path())}
 
-    config = ensure_config()
+    # Prerequisites first, so a machine without Node or Pi gets a clear reason and no local-mcp.json.
     node = _node()
     if not SERVER.is_file():
         raise SystemExit('missing server: %s' % SERVER)
+    _pi_dir(node)
+    config = ensure_config()
     env = {**os.environ, 'LOCAL_MCP_CONFIG': str(config_path()), 'LOCAL_MCP_PORT': str(port()),
-           'LOCAL_MCP_LOG': str(log_path())}
+           'LOCAL_MCP_LOG': str(log_path()), **listen_env()}
     log_path().parent.mkdir(parents=True, exist_ok=True)
+    _rotate_log()
     flags = 0
     if os.name == 'nt':
         flags = (getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
@@ -425,8 +503,14 @@ _COMMANDS = {'start': start, 'status': status, 'stop': stop}
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if not argv or argv[0] in ('-h', '--help'):
-        sys.stderr.write('usage: python -X utf8 scripts/local_mcp.py {start|status|stop}\n')
+        sys.stderr.write('usage: python -X utf8 scripts/local_mcp.py {start [--host HOST]|status|stop}\n')
         return 2
+    if '--host' in argv[1:]:
+        index = argv.index('--host', 1)
+        if index + 1 >= len(argv):
+            _emit({'ok': False, 'error': '--host needs an address'})
+            return 2
+        os.environ['LOCAL_MCP_HOST'] = argv[index + 1]  # explicit bind: same as LOCAL_MCP_HOST
     command = _COMMANDS.get(argv[0])
     if command is None:
         _emit({'ok': False, 'error': 'unknown command %r (expected start, status or stop)' % argv[0]})

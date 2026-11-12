@@ -22,11 +22,11 @@ description: 在 Google Colab 付费 GPU（默认 G4 RTX PRO 6000 96GB）上部�
 | 项 | 要求 | 自检 |
 |---|---|---|
 | Colab 付费额度 | 付费计算单元（CU）：Colab Pro / Pro+ / Ultra 订阅或按量购买，账号能选 G4。免费档不行。费率与额度会变，估算见 [`references/cu-budget.md`](references/cu-budget.md) | `colab usage`（装好 CLI 后） |
-| 主机 | Windows 10/11 + Python 3.10+ + Git。脚本用计划任务与 `taskkill` 清理保活进程，按 Windows 编写；macOS/Linux 未验证 | `python --version` |
+| 主机 | Windows 10/11 + Python 3.10+（`google-colab-cli` 需 3.12+，`uv` 会自动管理）+ Git。脚本用计划任务与 `taskkill` 清理保活进程，按 Windows 编写；macOS/Linux 未验证 | `python --version` |
 | Python 依赖 | 仅 `requests`，其余为标准库 | `pip install requests` |
-| 官方 Colab CLI | **google-colab-cli 0.7.5**，固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
+| 官方 Colab CLI | **google-colab-cli 0.7.5**（需 Python ≥ 3.12，`uv tool install` 自动管理，或复用 Colab-yoga 内置 Python），固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
 | Tailscale | 本机已安装并登录（客户端 ≥ 1.78）；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签、OAuth 客户端，并在 DNS 设置里开启 **MagicDNS** 与 **HTTPS Certificates** | `tailscale version` |
-| HF 令牌（可选） | 受限/限速模型需要；本机 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 会被自动转发到运行时 | |
+| HF 令牌（可选） | 现役 4 个模型都是公开权重，不需要；仅受限/限速模型才用；本机 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 会被自动转发到运行时 | |
 | Colab-yoga（可选） | Windows 托盘 GPU 管理台，只管 LLM 服务（不含视频/生图/ComfyUI）：查看状态与 CU、空闲倒计时续时、切换模型、释放运行时。与本技能共用同一台 G4，不装不影响任何核心命令 | `python -X utf8 scripts/colab_cli.py yoga status` |
 | 浏览器驱动（可选） | 仅后备轨道（网页同步、零 OAuth 查账与强杀）需要：Node.js + 已登录 Google 的 Edge，再装 Playwriter 或 `@playwright/cli`，命令见第 6 节 | |
 
@@ -103,11 +103,11 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 | `ts_client_secret` | `TS_CLIENT_SECRET` | 必填。上述 OAuth 客户端的 secret，运行时用它现签一次性、临时的节点认证密钥 |
 | `tailnet_fqdn` | `TAILNET_FQDN` | 必填。服务域名，形如 `qwen.<你的tailnet>.ts.net`；第一段就是你在 Tailscale 里建的 Service 名（默认 `qwen`，要换名见下面的 `service_name`） |
 | `service_name` | `TS_SERVICE_NAME` | 可选，默认 `qwen`。运行时发布的 Tailscale Service 是 `svc:<service_name>`；改名时 Tailscale 里建的 Service、ACL 里的 `svc:...` 和 `tailnet_fqdn` 第一段都要同名，不一致时生成 notebook 会在下载权重前就报错 |
-| `local_tailscale_ip` | `LOCAL_TAILSCALE_IP` | 可选。运行 `local_novel_mcp.py` 那台主机的 Tailscale IP。**不填则生成的 notebook 整个跳过本机文件桥**（不起隧道线程，WebUI 也没有 `local_novel_fs` 条目），其余功能不受影响 |
+| `local_tailscale_ip` | `LOCAL_TAILSCALE_IP` | 可选，仅 MCP 用。运行 `scripts/local_mcp.py`（Pi 原生工具桥）那台主机的 Tailscale IP。**不填则生成的 notebook 整个跳过本机工具桥**（不起隧道线程，WebUI 也没有 `local_mcp` 条目，`start` 也不自动拉起本机桥），其余功能不受影响 |
 | `*_drive_id`（每个现役模型一项） | 见 `scripts/secrets_config.py` | 可选。该模型 notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab`（网页后备轨道）需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
 | `webui_system_prompt` | `WEBUI_SYSTEM_PROMPT` | 可选。写进 WebUI 配置的默认系统提示；默认为空（不设系统提示）。多行文本在 JSON 里写成带 `\n` 的字符串 |
 | `notebooks_dir` | `COLAB_NOTEBOOKS_DIR` | 可选。生成私有 notebook 后额外镜像到的 Drive “Colab Notebooks”文件夹；默认不镜像（见下方安全说明） |
-| `novel_root` | `NOVEL_ROOT` | 可选。`local_novel_mcp.py` 向 WebUI 暴露的本机目录，默认 `~/Documents/colab-novel`；支持 `~` |
+| `novel_root` | `NOVEL_ROOT` | 可选。`local_mcp.py` 首次启动时的默认工作目录（已有 `~/.config/colab-cli/local-mcp.json` 的 `cwd` 优先）；未设时 `~/Documents/Colab创作` 存在则用，否则 `~/Documents`；支持 `~`。不是沙箱。独立的 `local_novel_mcp.py` 小说工具也读它（其默认是 `~/Documents/colab-novel`） |
 | `novel_skill_map` | `NOVEL_SKILL_MAP` | 可选。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件；默认为空（不暴露任何目录外文件）。写成一个字符串，条目形如 `名字=文件路径`，用 `;` 或换行分隔，路径支持 `~`，例如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；改后要重启 `local_novel_mcp.py` |
 | `browsermcp_bridge` | `COLAB_BROWSERMCP_BRIDGE` | 可选。BrowserMCP 桥脚本（`.mjs`）路径，后备轨道的第一档浏览器驱动；不设则直接用 Playwriter / playwright-cli |
 
@@ -115,7 +115,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 
 | 环境变量 | 作用 |
 |---|---|
-| `COLAB_YOGA_DIR` | Colab-yoga 安装目录（默认 `%LOCALAPPDATA%\Programs\Colab-yoga`）；`colab_cli.py yoga` 和 runners 导出都认它 |
+| `COLAB_YOGA_DIR` | 可选。指定 Colab-yoga 目录：runners 与 `local_mcp_bridge.json` 写到这里（不存在会创建），`colab_cli.py yoga` 也用它。不设时 runners 写到 `%LOCALAPPDATA%\Colab-yoga`，`colab_cli.py yoga` 依次找 `install.json` 的 `appDir`、`%LOCALAPPDATA%\Programs\Colab-yoga` |
 | `DRIVEFS_DB` | 指定 Drive 客户端元数据库路径（自动解析 Drive 文件 ID 用） |
 | `PLAYWRITER_ENTRY` | Playwriter 的 `dist/index.js` 路径；默认是全局 npm 前缀下的位置 |
 | `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌 |
@@ -175,8 +175,8 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
 
 Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runners.json`（含真实密钥，不提交、不外传）。链路最常断在“目录没装对”，按下面做：
 
-1. 把 Colab-yoga 装到 `%LOCALAPPDATA%\Programs\Colab-yoga`（Git Bash 里写 `"$LOCALAPPDATA/Programs/Colab-yoga"`）；或解压到别处，并把环境变量 `COLAB_YOGA_DIR` 设成那个目录（用户级环境变量，新开的进程才生效；当前 agent 进程里可直接 `export COLAB_YOGA_DIR=...` 后再跑命令）。该目录里要同时有 `Colab-yoga.exe`、`bridge\`、`runtime\`。目录以 `COLAB_YOGA_DIR` 为准。
-2. 运行 `python -X utf8 scripts/colab_kernel.py --all`，在输出里确认有一行 `Exported Colab-yoga runners to: <路径>`。若出现 `skipped exporting runners`，说明目录不存在，回到第 1 步；若出现 `Refused to export Colab-yoga runners: missing ...`（退出码 1），说明必填四项里还有没填的，先补 `.secrets.json` / 环境变量，不会写出带占位符的 runners。
+1. 安装版装到 `%LOCALAPPDATA%\Programs\Colab-yoga`，免安装版解压到任意目录，都不用设环境变量：runners 默认写到 Colab-yoga 的用户数据目录 `%LOCALAPPDATA%\Colab-yoga`（不存在自动创建），并刷新 `%LOCALAPPDATA%\Programs\Colab-yoga` 或 `install.json` 的 `appDir` 里已有的旧副本；同目录写 `local_mcp_bridge.json`（`{"script": "<本仓库 scripts/local_mcp.py 绝对路径>"}`），克隆在任意目录都能被 Colab-yoga 发现。只有想放到别处时才设 `COLAB_YOGA_DIR`（以它为准，用户级环境变量新开的进程才生效）。
+2. 运行 `python -X utf8 scripts/colab_kernel.py --all`，在输出里确认有一行 `Exported Colab-yoga runners to: <路径>`。若出现 `skipped exporting runners`，说明 `LOCALAPPDATA` 与 `COLAB_YOGA_DIR` 都没设且安装目录不存在，回到第 1 步；若出现 `Refused to export Colab-yoga runners: missing ...`（退出码 1），说明必填四项里还有没填的，先补 `.secrets.json` / 环境变量，不会写出带占位符的 runners。
 3. 改了 `.secrets.json`（密钥、tailnet、文件桥 IP、系统提示）之后必须重跑第 2 步，runners 里的值是生成时写死的。
 
 ---
@@ -220,7 +220,7 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 ## 6. 评测、网络入口与账单
 
 - **A/B 基准（[`scripts/bench_ab.py`](scripts/bench_ab.py)）**：改参数（MTP 步数、KV 类型、量化、ubatch）时对已在跑的服务执行 `decode`、`recall`（8k/32k/128k/216k 大海捞针）、`tools`（48 次工具调用）与 `compare a.json b.json`。上线门槛：`recall` 全过、`tools` 0 失败。
-- **网络入口**：日常自用走 **Tailscale Service**（默认 `svc:qwen`，仅 tailnet 私网可见，**不鉴权**：没给 llama-server 加 `--api-key-file`，WebUI 才能免密即开即用，tailnet 就是唯一的门；配置了 `local_tailscale_ip` 时，经 SOCKS5 反连本机 `:3426` 的 `local_novel_mcp.py` 读写 `novel_root` 目录），详见 [`references/tailscale-serve.md`](references/tailscale-serve.md)。要暴露公网（Cloudflare Named Tunnel / Funnel）必须启用 `--api-key-file`，详见 [`references/secure-remote-service.md`](references/secure-remote-service.md)。
+- **网络入口**：日常自用走 **Tailscale Service**（默认 `svc:qwen`，仅 tailnet 私网可见，**不鉴权**：没给 llama-server 加 `--api-key-file`，WebUI 才能免密即开即用，tailnet 就是唯一的门；配置了 `local_tailscale_ip` 时，经 SOCKS5 反连本机 `<local_tailscale_ip>:3426` 的 `local_mcp.py` 工具桥（专用 Bearer 令牌；本机默认只绑 `127.0.0.1` 与该 Tailscale IP，不绑 `0.0.0.0`）读写本机文件），详见 [`references/tailscale-serve.md`](references/tailscale-serve.md)。要暴露公网（Cloudflare Named Tunnel / Funnel）必须启用 `--api-key-file`，详见 [`references/secure-remote-service.md`](references/secure-remote-service.md)。
 - **`[?]` 幽灵实例（`colab sessions` 里没有本地会话名的云端实例）与 `stop --all` 后仍有 active**，按成本从低到高处理，**前两种不需要浏览器**：
   1. `colab_cli.py stop --all` 已自动做：装了 Colab-yoga 时先调它的 bridge `stop_all`（按 endpoint 调官方 unassign；这会释放账号下**所有**分配，包括 Colab-yoga 正在用的）。只有 `stop --all` 会这样升级（释放整个账号）。`stop <slug>` 停完那一个名字后，只会对 `colab sessions` 里连续两次（间隔 5 秒）都显示为 `[?]` 的无名分配，经 colab CLI 自带客户端按 endpoint 逐个 unassign，再用 `usage` 与 `sessions` 核验；有本地名字的会话（含 Colab-yoga 的 easycolab）一律不碰，不调用 `stop_all`，释放不掉的会提示到网页“管理会话”手动终止。手动等价命令（Git Bash）：`"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" stop_all`；cmd 里是 `"%LOCALAPPDATA%\Programs\Colab-yoga\runtime\python.exe" -u "%LOCALAPPDATA%\Programs\Colab-yoga\bridge\colab_yoga_bridge.py" stop_all`；目录以 `COLAB_YOGA_DIR` 为准。
   2. 本人在 Colab 网页：右上角“代码执行程序 / Runtime” → “管理会话 / Manage sessions”，逐个终止。最终凭据永远是 `status` 的 `Active assignments: 0 | Burn rate: 0.00 CU/h`。
@@ -243,13 +243,13 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 | `Refused to export Colab-yoga runners` | `colab_kernel.py` 导出 runners 前发现必填四项里有空值或 `<YOUR_...>` 占位符，报错里列出了字段名；补齐后重跑 `colab_kernel.py --all` |
 | 终端报 `UnicodeEncodeError` | 控制台编码不是 UTF-8。统一用 `python -X utf8 scripts/...` 运行（入口也已强制 UTF-8，只有旧版脚本才会在这里失败）。`start` 在分配之后遇到任何异常都会释放本次创建的实例，仍要 `status` 核验 |
 | `Colab-yoga not found at ...` | 未装可选的 Colab-yoga：从其仓库安装，或设 `COLAB_YOGA_DIR` 指向现有安装；核心命令不受影响 |
-| Colab-yoga 看不到本仓库的模型，输出里有 `skipped exporting runners` | Colab-yoga 目录不存在或不是 `COLAB_YOGA_DIR` 指的那个；按第 4 节“runners 固定三步”重做，并确认出现 `Exported Colab-yoga runners to:` |
+| Colab-yoga 看不到本仓库的模型，输出里有 `skipped exporting runners` | `LOCALAPPDATA` 与 `COLAB_YOGA_DIR` 都没设且默认安装目录不存在；按第 4 节“runners 固定三步”重做，并确认出现 `Exported Colab-yoga runners to:` |
 | `colab new --gpu G4` 报 `Backend rejected accelerator` | G4 只有单一 176 GiB 规格，传 `--high-mem` 会被拒（`colab_cli.py` 已自动跳过）；也可能是账号无 G4 额度或当日无空闲卡，稍后重试 |
 | 实例 20～35 分钟后无故消失 | 心跳进程没在跑（电脑休眠或进程被杀）；`status` 看心跳计数，`start` / `launch` 才会拉起保活 |
 | `stop <slug>` 后仍有 active | 先看末尾提示：只剩有名字的会话（如 Colab-yoga）就是它们仍在运行，不是残留，按需单独停；`[?]` 已由 `stop <slug>` 按 endpoint 清过，清不掉的才走下一行 |
 | `stop --all` 后仍有 active 或 `[?]` | 走第 6 节“`[?]` 幽灵实例”的三档顺序：先 Colab-yoga bridge `stop_all`，再 Colab 网页“管理会话”，最后才是浏览器驱动；`status` 核验 |
 | 浏览器后备轨道报 `playwriter is not installed`，或各档都不可用 | 没装驱动：按第 6 节第 3 档装 Playwriter（`npm install -g playwriter` + 扩展）或 `@playwright/cli`，并确认 Edge 里已登录 Google。急着停机就用前两档 |
 | 域名超时或解析不到 | Service 审批刚生效需几秒到十几秒，重试；确认本机 Tailscale ≥ 1.78 且在同一 tailnet，DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services`（见 `references/tailscale-serve.md`） |
-| WebUI 的 MCP 卡片报 `proxy error: Failed to read connection` | 运行时那头的隧道已通，但本机 `:3426` 没有程序在接：在 `local_tailscale_ip` 那台主机上运行 `python -X utf8 scripts/local_novel_mcp.py`，再点卡片上的刷新。设成开机自启时，脚本若放在登录后才挂载的盘（网盘映射盘等），启动项要等文件出现再拉起。重复启动是安全的：已有实例在跑时，后来的会打印 `already running` 后退出；端口被别的程序占用则报错退出 |
+| WebUI 的 MCP 卡片报 `proxy error: Failed to read connection` | 运行时那头的隧道已通，但本机 `:3426` 没有程序在接：在 `local_tailscale_ip` 那台主机上运行 `python -X utf8 scripts/local_mcp.py start`（或点 Colab-yoga MCP 卡片的「启动」），再点卡片上的刷新。缺 Node.js 或全局 `@earendil-works/pi-coding-agent` 时它会直接报错、不写配置；日志在 `~/.config/colab-cli/local-mcp.log`，日志里出现 `extra listener ... not started` 表示 Tailscale 当时未连上，连上后 `stop` 再 `start`。重复启动是安全的：已在跑时复用同一进程；端口被别的程序占用则报错并保留对方 |
 | 首格报「需要重新启动服务，但缺少上次为扩大提示缓存而删掉的分片副本」 | 配置变更触发重启，再跑一次首格即自动重下被回收的显存专用分片 |
 | 测试失败 | 在 `scripts/` 下跑 `python -X utf8 -m unittest discover -p "test_*.py"`，按失败的模块名定位；改过 `MODELS` 声明多半是 AST/指纹检查在拦 |

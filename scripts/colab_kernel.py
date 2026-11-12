@@ -3,8 +3,8 @@
 Single source of truth for the active llama.cpp G4 notebooks (`qwen38-huihui-v2`, `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`).
 Retired models (qwen38-fn, 122B, Nemotron, Ortenzya) are declared in archived_models.py and build on this same
 kernel; their last generated notebooks stay in notebooks/.
-- Runtime kernel: llama.cpp b12032, Tailscale svc:qwen + SOCKS5 bridge to local Windows
-  novel MCP (local_tailscale_ip:3426), persistent --ui-config-file + --ui-mcp-proxy, /dev/shm tmpfs
+- Runtime kernel: llama.cpp b12032, Tailscale svc:qwen + SOCKS5 bridge to the local
+  local_mcp.py tools bridge (local_tailscale_ip:3426), persistent --ui-config-file + --ui-mcp-proxy, /dev/shm tmpfs
   allocator, 32-stream zero-GIL downloader, millisecond size check (no startup SHA-256),
   16 MiB GGUF template patcher, production path DEBUG_VERIFY=False (banner right after /health;
   CUDA warmup, tmpfs release and Tailscale finish in the background; LAUNCH_DETACHED=1 returns
@@ -15,8 +15,10 @@ kernel; their last generated notebooks stay in notebooks/.
   into .secrets.json, AST-validates all code cells, and syncs to Colab Web (--sync-colab) and Magpie (--sync-magpie,
   additive). A private build carries real keys, so it is mirrored to a Drive folder only on request:
   `notebooks_dir` in .secrets.json, COLAB_NOTEBOOKS_DIR, or --mirror-drive (probe for a local My Drive).
-- Colab-yoga: unless --sanitized, also exports the headless cell-1 runners to <Colab-yoga install>/colab_kernel_runners.json
-  (COLAB_YOGA_DIR overrides the install dir; a missing dir is reported and skipped). Re-run after editing .secrets.json.
+- Colab-yoga: unless --sanitized, also exports the headless cell-1 runners to %LOCALAPPDATA%/Colab-yoga/colab_kernel_runners.json
+  (created on demand; COLAB_YOGA_DIR overrides that dir) and refreshes an older copy in %LOCALAPPDATA%/Programs/Colab-yoga
+  or in the install.json "appDir", plus local_mcp_bridge.json pointing at this clone's scripts/local_mcp.py, so a
+  portable Colab-yoga unzipped anywhere finds both with no setup. Re-run after editing .secrets.json.
 
 Usage:
   python -X utf8 scripts/colab_kernel.py --all [--sync-colab] [--sync-magpie] [--mirror-drive]
@@ -340,7 +342,7 @@ def service_name(config: dict) -> str:
 
 
 def bridge_ip(config: dict) -> str:
-    """Tailscale IP of the machine running local_novel_mcp.py, or '' when no file bridge is configured.
+    """Tailscale IP of the machine running local_mcp.py, or '' when no local bridge is configured.
 
     An unset value, a <YOUR_...> placeholder or anything that is not an IPv4 address disables the bridge in
     the generated notebook instead of leaving a broken tunnel thread behind.
@@ -1935,26 +1937,72 @@ def probe_hf_repo(repo_id: str, rev: str = 'main') -> None:
         print(f'  {rfn} | {size:_} B ({size / (1024**3):.2f} GiB) | sha256={sha}{info_extra}')
 
 
+YOGA_RUNNERS_NAME = 'colab_kernel_runners.json'
+YOGA_MCP_BRIDGE_NAME = 'local_mcp_bridge.json'
+
+
 def yoga_runners_path() -> Path:
-    """Where Colab-yoga reads its runners: <install dir>/colab_kernel_runners.json (COLAB_YOGA_DIR overrides the install dir)."""
+    """Where Colab-yoga reads its runners.
+
+    $COLAB_YOGA_DIR/colab_kernel_runners.json when set; else %LOCALAPPDATA%/Colab-yoga/colab_kernel_runners.json,
+    the per-user data dir every Colab-yoga build (installed or portable) reads; without LOCALAPPDATA, the
+    default install dir ~/AppData/Local/Programs/Colab-yoga.
+    """
     base = os.environ.get('COLAB_YOGA_DIR')
     if base:
-        return Path(base) / 'colab_kernel_runners.json'
-    local = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local')))
-    return local / 'Programs' / 'Colab-yoga' / 'colab_kernel_runners.json'
+        return Path(base) / YOGA_RUNNERS_NAME
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        return Path(local) / 'Colab-yoga' / YOGA_RUNNERS_NAME
+    return Path.home() / 'AppData/Local' / 'Programs' / 'Colab-yoga' / YOGA_RUNNERS_NAME
+
+
+def _yoga_dir_created_on_demand() -> bool:
+    """True when the default runners dir is created if missing: COLAB_YOGA_DIR or a non-empty LOCALAPPDATA."""
+    return bool(os.environ.get('COLAB_YOGA_DIR') or os.environ.get('LOCALAPPDATA'))
+
+
+def yoga_legacy_runner_copies(primary: Path) -> list[Path]:
+    """Older runners files Colab-yoga might read alongside or before the primary one; refreshed only when already present.
+
+    %LOCALAPPDATA%/Programs/Colab-yoga/colab_kernel_runners.json and the "appDir" of
+    %LOCALAPPDATA%/Colab-yoga/install.json, each only when a runners file already sits there so no extra
+    key-bearing copy is created. Empty with COLAB_YOGA_DIR.
+    """
+    local = os.environ.get('LOCALAPPDATA')
+    if os.environ.get('COLAB_YOGA_DIR') or not local:
+        return []
+    found = []
+    programs_file = Path(local) / 'Programs' / 'Colab-yoga' / YOGA_RUNNERS_NAME
+    if programs_file.is_file():
+        found.append(programs_file)
+    try:
+        app_dir = json.loads((Path(local) / 'Colab-yoga' / 'install.json').read_text(encoding='utf-8')).get('appDir')
+    except (OSError, ValueError, AttributeError):
+        app_dir = None
+    if isinstance(app_dir, str) and app_dir.strip() and (Path(app_dir) / YOGA_RUNNERS_NAME).is_file():
+        found.append(Path(app_dir) / YOGA_RUNNERS_NAME)
+    unique = []
+    for path in found:
+        if os.path.normcase(os.path.abspath(path)) != os.path.normcase(os.path.abspath(primary)) and path not in unique:
+            unique.append(path)
+    return unique
 
 
 def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
     """Export headless cell-1 runner scripts for all active MODELS to Colab-yoga's install directory.
 
-    Skipped with a hint when Colab-yoga is not installed (its directory does not exist); the file is only
-    useful to that app, so nothing is created on its behalf. Refused, naming the fields, when one of the
-    four required values is empty or still a <YOUR_...> placeholder: Colab-yoga would otherwise start a paid
-    GPU with a dummy key and tailnet name, and "Exported ..." is what callers take as success.
+    The default target (yoga_runners_path) is created on demand when COLAB_YOGA_DIR or LOCALAPPDATA is set;
+    an explicit out_path, or a default without either variable, is skipped with a hint when its directory
+    does not exist. Refused, naming the fields, when one of the four required values is empty or still a
+    <YOUR_...> placeholder: Colab-yoga would otherwise start a paid GPU with a dummy key and tailnet name,
+    and "Exported ..." is what callers take as success. On success the default export also refreshes
+    yoga_legacy_runner_copies(), and every export writes local_mcp_bridge.json next to the runners.
     Returns True only when the file was written.
     """
     dst = out_path or yoga_runners_path()
-    if not dst.parent.exists():
+    create = out_path is None and _yoga_dir_created_on_demand()
+    if not create and not dst.parent.exists():
         print(f'Colab-yoga not installed ({dst.parent} missing); skipped exporting runners. '
               'Install it to %LOCALAPPDATA%\\Programs\\Colab-yoga, or unzip it anywhere and set COLAB_YOGA_DIR to that '
               'folder, then re-run `python -X utf8 scripts/colab_kernel.py --all`. '
@@ -1966,6 +2014,8 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
               'placeholder in .secrets.json / environment). Fill them in, then re-run '
               '`python -X utf8 scripts/colab_kernel.py --all`.', file=sys.stderr)
         return False
+    if create:
+        dst.parent.mkdir(parents=True, exist_ok=True)
     marker ='就绪横幅 + WebUI 标签页 + 停机按钮'
     runners = {}
     for slug, spec in MODELS.items():
@@ -1992,8 +2042,18 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
             ],
             'code': cell,
         }
-    dst.write_text(json.dumps(runners, ensure_ascii=False, indent=2) + '\n', encoding='utf-8', newline='')
+    text = json.dumps(runners, ensure_ascii=False, indent=2) + '\n'
+    dst.write_text(text, encoding='utf-8', newline='')
     print('Exported Colab-yoga runners to:', dst)
+    for copy in ([] if out_path else yoga_legacy_runner_copies(dst)):
+        try:
+            copy.write_text(text, encoding='utf-8', newline='')
+            print('Refreshed older Colab-yoga runners copy:', copy)
+        except OSError as err:
+            print(f'Could not refresh older Colab-yoga runners copy {copy}: {err}', file=sys.stderr)
+    bridge = {'script': str(Path(__file__).resolve().with_name('local_mcp.py'))}
+    (dst.parent / YOGA_MCP_BRIDGE_NAME).write_text(json.dumps(bridge, ensure_ascii=False, indent=2) + '\n',
+                                                    encoding='utf-8', newline='\n')
     return True
 
 
@@ -2037,7 +2097,8 @@ def main():
     if '--sanitized' not in args:
         cfg, _, _, sources = load_config([])
         # A missing Colab-yoga install is a normal skip; only a refusal over unset required values is a failure.
-        refused = bool(missing_required(sources)) and yoga_runners_path().parent.exists()
+        refused = bool(missing_required(sources)) and (_yoga_dir_created_on_demand()
+                                                       or yoga_runners_path().parent.exists())
         export_yoga_runners(cfg)
     if '--sync-magpie' in args:
         sync_magpie_models()
