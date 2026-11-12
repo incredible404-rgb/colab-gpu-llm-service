@@ -21,6 +21,13 @@ import colab_cli
 import colab_keepalive as ka
 
 
+def setUpModule():
+    # Lifecycle integration has its own isolated tests; these offline suites must not stop the user's bridge.
+    patcher = mock.patch.object(colab_cli, 'local_mcp', return_value={'ok': True})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 class PingClassifyTests(unittest.TestCase):
     def test_read_timeout_is_success(self):
         self.assertEqual(ka.classify_ping(None, requests.exceptions.ReadTimeout('timed out')), 'ok')
@@ -440,8 +447,10 @@ class CliStopOrderingTests(unittest.TestCase):
              mock.patch.object(colab_cli, 'stop_keepalive', side_effect=fake_stop_keepalive), \
              mock.patch.object(colab_cli, 'colab', side_effect=fake_colab), \
              mock.patch.object(colab_cli, 'usage', return_value={'balance': 5.0, 'rate': 0.0, 'active': 0}), \
+             mock.patch.object(colab_cli, 'stop_novel_mcp') as stop_mcp, \
              contextlib.redirect_stdout(out):
             rc = colab_cli.cmd_stop(names)
+            stop_mcp.assert_called_once_with(account_idle=True)
         return rc, log, out.getvalue()
 
     def test_stop_all_overlaps_probes_and_kills_every_daemon_before_any_colab_stop(self):

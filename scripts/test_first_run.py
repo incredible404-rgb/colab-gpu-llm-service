@@ -30,6 +30,13 @@ CFG = {
 }
 
 
+def setUpModule():
+    # Lifecycle integration has its own isolated tests; these offline suites must not stop the user's bridge.
+    patcher = mock.patch.object(colab_cli, 'local_mcp', return_value={'ok': True})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 def _clean_env():
     return {k: v for k, v in os.environ.items() if k not in ENV_NAMES}
 
@@ -270,8 +277,19 @@ class KernelPortabilityTests(unittest.TestCase):
             self.assertIn('LOCAL_MCP_IP = ""', src)
             ast.parse(src)
         ui, src = _ui_cfg(ck.build_notebook_dict(spec, CFG))
-        self.assertEqual(json.loads(ui['mcpServers'])[0]['name'], 'local_novel_fs')
+        self.assertEqual(json.loads(ui['mcpServers'])[0]['name'], 'local_mcp')
         self.assertIn('LOCAL_MCP_IP = "192.0.2.1"', src)
+
+    def test_local_mcp_token_stays_out_of_public_defaults_and_notebooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            token = 'test-only-private-mcp-canary'
+            config = Path(tmp) / 'local-mcp.json'
+            config.write_text(json.dumps({'token': token}), encoding='utf-8')
+            with mock.patch.dict(os.environ, {'LOCAL_MCP_CONFIG': str(config)}):
+                nb = ck.build_notebook_dict(ck.MODELS[SLUG], CFG)
+            entry = json.loads(_ui_cfg(nb)[0]['mcpServers'])[0]
+            self.assertNotIn('headers', entry)
+            self.assertNotIn(token, json.dumps(nb, ensure_ascii=False))
 
     def test_system_prompt_is_empty_unless_configured(self):
         spec = ck.MODELS[SLUG]

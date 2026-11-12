@@ -20,7 +20,7 @@ Colab 运行时是一次性的，每次新会话都会清空 `/content`，因此
 | DDR5 `tmpfs` 内存盘 + 32 路并发直写 | Colab 持久盘写入上限约 200–350 MiB/s；写一个 95 GB 的模型会平白多花好几分钟 |
 | PLE 嵌入表 `MAP_POPULATE` 零拷贝映射 | 消除推理期间的二次内存拷贝与缺页中断（page fault） |
 | `llama.cpp` MTP 投机解码 | 针对代码、工具调用与长文写作调优的 MTP 草稿头投机解码 |
-| Tailscale Service（`svc:qwen`）+ 可选本机 MCP 文件桥（`local_novel_mcp.py`） | 跨运行时固定不变的 `qwen.<YOUR_TAILNET>.ts.net` 入口地址，搭配反向 SOCKS5 桥让 WebUI 无需弹窗确认即可读写本地目录 |
+| Tailscale Service（`svc:qwen`）+ 可选 Pi 工具桥（`local_mcp.py` / `.mjs`） | 固定私网入口与原生 `read`、`write`、`edit`、`bash`，本机工具使用独立 Bearer 令牌 |
 | **后备轨道：** 浏览器标签页同步、零 OAuth CU 计费与幽灵会话强杀（`colab_sync.py`、`colab_meter.py`） | 在已登录浏览器标签页推送/运行 Notebook、免 OAuth 读取实时余额与燃烧率、打印双轨 CU 账单，并强杀关掉页面后残留的无名 `[?]` 会话 |
 | 可选配套 [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 托盘 GPU 管理台（`colab_cli.py yoga`） | 只管 LLM 服务（不含视频/生图/ComfyUI）：看状态与 CU、续时、切换模型、释放；与本仓库共用同一台 G4。`colab_kernel.py` 把现役模型的无头首格导出为它的 `colab_kernel_runners.json` |
 | `.secrets.json` + `--sanitized` | Notebook 由私有配置生成；脱敏构建（sanitized build）不含任何真实密钥、Tailnet 名称或 Google Drive 文件 ID |
@@ -188,16 +188,16 @@ python -X utf8 scripts/colab_cli.py stop --all  # 用完立即释放，核验末
 
 | 字段 | 含义 |
 |---|---|
-| `api_key` | 你自定义的任意长随机串。它被写进运行时的 `<root_dir>/.llama-api-key`，笔记本内部调用和本仓库脚本访问 `/v1` 时带 `Authorization: Bearer <api_key>`。**llama-server 启动时没有 `--api-key` / `--api-key-file`，不校验它**：tailnet 内任何能连上 `<service>.<tailnet>.ts.net:443` 的设备都能免密调用 `/v1`、打开 WebUI；配了文件桥时还能经 `--ui-mcp-proxy` 的 MCP 代理读、写、移动、删除本机 `novel_root` 里的文件。这是有意的（WebUI、Magpie 免密即开即用），**tailnet 就是唯一的门，`api_key` 目前不构成访问控制**。把 tailnet 共享给别人（共享设备、邀请成员、Funnel/Tunnel）之前，先在 ACL 里只放行自己的设备，或给 llama-server 加回 `--api-key-file`（见 [`references/secure-remote-service.md`](references/secure-remote-service.md)）并停掉文件桥 |
+| `api_key` | 写入运行时、供客户端访问 `/v1` 使用的密钥。llama-server 启动时没有 `--api-key` / `--api-key-file`，因此 API 和 WebUI 依靠 tailnet 限制访问，不校验此值。本机 MCP 独立验证专用 Bearer 令牌，API 密钥不能获得本机工具权限。API 访问控制见 [`references/secure-remote-service.md`](references/secure-remote-service.md) |
 | `ts_client_id`、`ts_client_secret` | Tailscale OAuth 客户端凭据（仅 Auth Keys: Write，标签 `tag:colab`），运行时用它现签一次性临时认证密钥 |
 | `tailnet_fqdn` | 服务访问域名，形如 `qwen.<YOUR_TAILNET>.ts.net`，第一段就是你建的 Service 名（默认 `qwen`） |
 | `service_name` | 可选，默认 `qwen`。运行时发布的 Tailscale Service 是 `svc:<service_name>`；改名时 Tailscale 里建的 Service、ACL 的 `svc:...` 与 `tailnet_fqdn` 第一段要同名，不一致时生成 Notebook 会在下载权重前报错 |
-| `local_tailscale_ip` | 可选。运行 `local_novel_mcp.py`（WebUI 本地文件桥）那台主机的 Tailscale IP。不填则生成的 Notebook 整个跳过本机文件桥（不起隧道线程，WebUI 里也没有 `local_novel_fs` 条目） |
+| `local_tailscale_ip` | 可选。运行 `local_mcp` 的主机 Tailscale IP。不填时不建立本机隧道，WebUI 默认配置也不添加 `local_mcp` 条目 |
 | `*_drive_id`（每个现役模型一项） | 可选。该模型 Notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab` 需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
 | `webui_system_prompt` | 可选。写进 WebUI 配置的默认系统提示，默认为空（不设） |
 | `notebooks_dir` | 可选。生成私有 Notebook 后额外镜像到的 Drive “Colab Notebooks”目录，默认不镜像 |
-| `novel_root` | 可选。`local_novel_mcp.py` 向 WebUI 暴露的本机目录，默认 `~/Documents/colab-novel`，支持 `~` |
-| `novel_skill_map` | 可选。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件，默认为空（不暴露目录外文件）。字符串，条目 `名字=文件路径` 用 `;` 或换行分隔，路径支持 `~`，如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；环境变量 `NOVEL_SKILL_MAP`，改后重启 `local_novel_mcp.py` |
+| `novel_root` | 兼容配置，作为 `local_mcp` 首次启动的默认工作目录；已有 `local-mcp.json` 的 `cwd` 优先。此目录不是沙箱 |
+| `novel_skill_map` | 仅用于旧版 `local_novel_mcp.py`。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件，默认为空（不暴露目录外文件）。字符串，条目 `名字=文件路径` 用 `;` 或换行分隔，路径支持 `~`，如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；环境变量 `NOVEL_SKILL_MAP`，改后重启 `local_novel_mcp.py` |
 | `browsermcp_bridge` | 可选。BrowserMCP 桥脚本路径，后备轨道的第一档驱动；不设则直接用 Playwriter / playwright-cli |
 
 示例文件里的 `<YOUR_...>` 是占位符，不是可用值；可选字段（`service_name` 及之后）不在示例文件里，需要时手动加键，写成 `""` 等同于没填。每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`、`WEBUI_SYSTEM_PROMPT`、`COLAB_NOTEBOOKS_DIR`、`NOVEL_ROOT`、`COLAB_BROWSERMCP_BRIDGE`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符（可选项则为空）。其他可调环境变量：
@@ -261,7 +261,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"   # 全部单�
 | 实例 20～35 分钟后消失 | 心跳进程没在跑（电脑休眠或被杀）；`status` 查看，`start`/`launch` 才会拉起保活 |
 | `stop --all` 后仍有 active 或 `[?]` | 依次：① Colab-yoga bridge `stop_all`（`stop --all` 已自动试，手动：`runtime\python.exe -u bridge\colab_yoga_bridge.py stop_all`）；② Colab 网页“代码执行程序 → 管理会话”手动终止；③ 浏览器驱动 `python -X utf8 scripts/colab_sync.py --release-all`（需先装 Playwriter 等，见后备轨道一节）。最后用 `status` 核验 |
 | 域名超时 | Service 审批刚生效需几秒到十几秒，重试；确认 Tailscale ≥ 1.78、DNS 设置里开了 MagicDNS 与 HTTPS Certificates，ACL 含 `autoApprovers.services` |
-| WebUI 的 MCP 卡片报 `proxy error: Failed to read connection` | 运行时那头的隧道已通，但本机 `:3426` 没有程序在接：在 `local_tailscale_ip` 那台主机上运行 `python -X utf8 scripts/local_novel_mcp.py`，再点卡片上的刷新。设成开机自启时，脚本若放在登录后才挂载的盘（网盘映射盘等），启动项要等文件出现再拉起。重复启动是安全的：已有实例在跑时，后来的会打印 `already running` 后退出；端口被别的程序占用则报错退出 |
+| WebUI 的 MCP 连接失败 | 在本机执行 `python -X utf8 scripts/local_mcp.py start`，或点 Colab-yoga MCP 卡片的「启动」。401 表示客户端私有 Bearer 配置缺失或不匹配。端口冲突会指出占用者，并保留对方进程 |
 
 更完整的排障与模型接入流程见 [`SKILL.md`](SKILL.md) 第 7 节。
 
@@ -274,6 +274,37 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 ```
 
 `--sanitized` 会将所有敏感字段替换为占位符，并忽略本地 `.secrets.json` 与环境变量；同时它禁止与 `--sync-colab` 混用，防止误把占位符 Notebook 推送到 Colab。
+
+## 本机工具桥（local_mcp）
+
+桥直接调用本机已安装 Pi 的 `createCodingTools(cwd)`，提供原生 `read`、`write`、`edit`、`bash`：分段读取、图片附件、截断提示、多处精确编辑、命令超时及参数转换都沿用 Pi 的实现。工具以当前登录用户权限运行；默认工作目录不是沙箱。Pi 会话中的技能、规则和审批钩子不会自动加载。
+
+安装满足 Pi 要求的 Node.js 和 Pi（`npm i -g @earendil-works/pi-coding-agent`），然后在本机运行：
+
+```bash
+python -X utf8 scripts/local_mcp.py start
+python -X utf8 scripts/local_mcp.py status
+python -X utf8 scripts/local_mcp.py stop
+```
+
+首次启动会创建 `~/.config/colab-cli/local-mcp.json`，只在该文件中保存专用随机令牌和 `cwd`；已有配置不会被覆盖。首次工作目录优先取 `LOCAL_MCP_CWD`，兼容 `NOVEL_ROOT` / `novel_root`，未配置时选择现有的 Documents 目录。修改配置后重启桥生效。日志在同目录的 `local-mcp.log`，不记录令牌或命令正文。
+
+设置 `local_tailscale_ip` 后，新生成的 WebUI 默认工具条目名为 `local_mcp`，地址为 `http://127.0.0.1:3426/mcp`，使用云端代理。首次在 WebUI 的客户端私有 MCP 设置中，为该条目添加 `Authorization: Bearer <local-mcp.json 中的 token>`；以后复用浏览器保存的配置。默认条目不带真实令牌：notebook、runner 和可匿名读取的 `/props` 都不能保存它。本机令牌也不用于 llama-server 的 `api_key`。
+
+服务默认监听本机所有网卡的 3426 端口；云端到本机的连接经 Tailscale 加密。`/mcp` 无令牌或令牌错误均返回 401；匿名 `/health` 只报服务身份。启动等待真实就绪，重复或并发启动会复用同一实例；停止要验证该实例的鉴权和 PID，外来端口占用不会被接管。
+
+Colab CLI 在开始保活时自动启动桥；[Colab-yoga v0.5.0+](https://github.com/incredible404-rgb/Colab-yoga) 在唤醒时启动、活动会话期间每 60 秒检查并恢复，也提供不唤醒 GPU 的「启动」按钮。只有确认账号上没有活动实例后才自动关闭共享桥；账号查询失败时保留它。
+
+旧 `local_novel_mcp.py` 保留兼容，但升级前要先关闭它以腾出 3426。旧 `local_novel_fs` 条目、`read_novel_file` 等工具名以及 `skill:名称` 路径不适用于新桥；在私有客户端配置和系统提示中迁移为四个原生工具与真实文件路径。回退时关闭新桥，再运行旧脚本。
+
+隔离验证（仅使用临时文件和空闲端口，不分配 GPU）：
+
+```bash
+cd scripts
+python -X utf8 -m unittest discover -p 'test_*.py'
+node check_local_mcp.mjs <local_mcp.py 的绝对路径>
+python -X utf8 check_local_mcp_concurrency.py <local_mcp.py 的绝对路径>
+```
 
 ## 仓库目录结构
 
@@ -292,7 +323,8 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 | `scripts/colab_sync.py` | 后备轨道：Colab 网页推送与单元格执行（BrowserMCP→Playwriter→PW）及 /tun/m 释放 |
 | `scripts/colab_meter.py` | 后备轨道：零 OAuth status / start / stop CLI 与双轨 CU 账单 |
 | `scripts/colab_pw.mjs` | Playwriter 后备后端（支持 __ANY__ 标签页复用模式） |
-| `scripts/local_novel_mcp.py` | 桥接进 Colab WebUI 的本地 Windows 目录 MCP 服务 |
+| `scripts/local_mcp.py` / `.mjs` | 专用令牌鉴权的 Pi 原生工具与生命周期 helper |
+| `scripts/local_novel_mcp.py` | 保留兼容的旧版小说工具 |
 | `scripts/secrets_config.py` | .secrets.json / 环境变量 / 占位符加载器；示例占位符一律视为“未填写” |
 | `scripts/stdio_utf8.py` | 把 stdout/stderr 强制成 UTF-8，各入口脚本共用 |
 | `scripts/parallel_download.py` | 多进程并发下载器参考实现 |

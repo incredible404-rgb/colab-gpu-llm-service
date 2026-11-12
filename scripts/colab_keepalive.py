@@ -608,7 +608,22 @@ def main(argv: list[str]) -> int:
             delete_schtask(session)
         if exit_reason != 'starting':
             state_file.unlink(missing_ok=True)
+            if not any(cfg.glob('keepalive-*.json')):
+                _stop_novel_mcp(cfg)
     return 0
+
+
+def _stop_novel_mcp(cfg: Path) -> None:
+    """Last keep-alive session ended: stop the local MCP bridge through its own launcher.
+
+    The bridge is shared by every session, so it is stopped only when no keepalive-*.json is left. The
+    launcher re-reads the pid from the authenticated health endpoint and refuses to kill a process it does
+    not own; the old novel-mcp.pid file named a pid it never verified, so it is only cleaned up here.
+    """
+    from colab_cli import stop_novel_mcp
+    stop_novel_mcp()
+    (cfg / 'novel-mcp.pid').unlink(missing_ok=True)
+    (cfg / 'local-mcp.pid').unlink(missing_ok=True)
 
 
 def _stop_session(session: str, log) -> None:

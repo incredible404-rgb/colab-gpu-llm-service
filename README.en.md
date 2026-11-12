@@ -20,7 +20,7 @@ The runtime is disposable and `/content` is wiped on every new session, so every
 | DDR5 `tmpfs` RAM disk with 32-way direct writes | Colab's persistent disk caps writes at roughly 200-350 MiB/s; a 95 GB model would take minutes longer than it needs to |
 | `MAP_POPULATE` zero-copy mapping of the PLE table | Removes a second memory copy and page faults during inference |
 | `llama.cpp` MTP speculative decoding | Draft-head speculation tuned for code, tool calls and long-form writing |
-| Tailscale Service (`svc:qwen`) + optional local MCP file bridge (`local_novel_mcp.py`) | A fixed `qwen.<YOUR_TAILNET>.ts.net` address that survives runtime changes, plus a reverse SOCKS5 bridge so the WebUI can read/write a local folder without prompts |
+| Tailscale Service (`svc:qwen`) + optional Pi tools bridge (`local_mcp.py` / `.mjs`) | A stable private endpoint plus native `read`, `write`, `edit`, and `bash`, protected by a dedicated Bearer token |
 | **Fallback:** Browser-tab sync, zero-OAuth CU metering & ghost-session kill switch (`colab_sync.py`, `colab_meter.py`) | Pushes/runs notebooks in a signed-in browser tab, reads live balance/burn rate without OAuth, prints a two-track CU bill, and kills orphaned `[?]` sessions whose page was closed |
 | Optional companion [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) tray GPU manager (`colab_cli.py yoga`) | LLM service only (no video, image or ComfyUI): shows status and CU, extends the idle countdown, switches models, releases the runtime; shares the same G4 with this repo. `colab_kernel.py` exports the active models' headless cell 1 as its `colab_kernel_runners.json` |
 | `.secrets.json` + `--sanitized` | Notebooks are generated from a private config; a sanitized build contains no real credential, tailnet or Drive ID |
@@ -188,16 +188,16 @@ The first four are required by `start`; a missing one (or one that is still a `<
 
 | Field | Meaning |
 |---|---|
-| `api_key` | Any long random string you choose. It is written to `<root_dir>/.llama-api-key` on the runtime, and the notebook's internal calls and this repo's scripts send `Authorization: Bearer <api_key>` to `/v1`. **llama-server is started without `--api-key` / `--api-key-file` and does not check it**: any device on your tailnet that can reach `<service>.<tailnet>.ts.net:443` can call `/v1` and open the WebUI without a key, and when the file bridge is configured can also read, write, move and delete files under `novel_root` through the MCP proxy that `--ui-mcp-proxy` exposes. This is deliberate (WebUI and Magpie work key-less), so **the tailnet is the only gate and `api_key` is not access control today**. Before sharing your tailnet with anyone (shared devices, invited members, Funnel/Tunnel), restrict the ACL to your own devices, or add `--api-key-file` back to llama-server (see [`references/secure-remote-service.md`](references/secure-remote-service.md)) and turn the file bridge off |
+| `api_key` | A client-side key written to the runtime for `/v1` calls. llama-server starts without `--api-key` / `--api-key-file`, so API and WebUI access are gated by the tailnet rather than this value. Local MCP checks a separate dedicated Bearer token; the API key does not grant local tool access. See [`references/secure-remote-service.md`](references/secure-remote-service.md) for API access control |
 | `ts_client_id`, `ts_client_secret` | Tailscale OAuth client credentials (Auth Keys: Write only, tag `tag:colab`) used to mint one-shot ephemeral auth keys at runtime |
 | `tailnet_fqdn` | Service address, `qwen.<YOUR_TAILNET>.ts.net`; its first label is the Service name you created (default `qwen`) |
 | `service_name` | Optional, default `qwen`. The runtime publishes the Tailscale Service `svc:<service_name>`; when you rename it, the Service you created in Tailscale, the `svc:...` in the ACL and the first label of `tailnet_fqdn` must all match, otherwise generating the notebook fails before any weights are downloaded |
-| `local_tailscale_ip` | Optional. Tailscale IP of the machine running `local_novel_mcp.py` (the WebUI file bridge). When unset the generated notebook skips the local file bridge entirely (no tunnel thread, no `local_novel_fs` entry in the WebUI) |
+| `local_tailscale_ip` | Optional. Tailscale IP of the PC running `local_mcp`. Unset means no tunnel and no `local_mcp` WebUI default entry |
 | `*_drive_id` (one per active model) | Optional. Drive file ID of that model's notebook, needed only for `--sync-colab`; `colab_kernel.py` resolves and writes it back from the local Drive client database when generating |
 | `webui_system_prompt` | Optional. Default system prompt written into the WebUI config; empty (none) by default |
 | `notebooks_dir` | Optional. Drive "Colab Notebooks" folder that private notebooks are additionally mirrored into; no mirroring by default |
-| `novel_root` | Optional. Local directory `local_novel_mcp.py` exposes to the WebUI; default `~/Documents/colab-novel`, `~` is expanded |
-| `novel_skill_map` | Optional. Lets the WebUI read a few skill or notes files outside the novel directory with `read_novel_file(path="skill:<name>")`; empty by default (nothing outside the novel root is exposed). A string of `name=file path` entries separated by `;` or newlines, `~` expanded, e.g. `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`; environment variable `NOVEL_SKILL_MAP`. Restart `local_novel_mcp.py` after changing it |
+| `novel_root` | Compatibility setting for the first default cwd of `local_mcp`; an existing `local-mcp.json` cwd takes precedence. It is not a sandbox |
+| `novel_skill_map` | Legacy `local_novel_mcp.py` only. Lets the WebUI read a few skill or notes files outside the novel directory with `read_novel_file(path="skill:<name>")`; empty by default (nothing outside the novel root is exposed). A string of `name=file path` entries separated by `;` or newlines, `~` expanded, e.g. `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`; environment variable `NOVEL_SKILL_MAP`. Restart `local_novel_mcp.py` after changing it |
 | `browsermcp_bridge` | Optional. Path of a BrowserMCP bridge script, the first browser-driver tier of the fallback track; unset means Playwriter / playwright-cli directly |
 
 The `<YOUR_...>` values in the example file are placeholders, not usable values; the optional keys (`service_name` and after) are not in the example file, add them when needed; an optional key written as `""` counts as unset. Each field can also come from an environment variable: `LLAMA_API_KEY`, `TS_CLIENT_ID`, `TS_CLIENT_SECRET`, `TAILNET_FQDN`, `LOCAL_TAILSCALE_IP`, plus `G4HUIHUI_DRIVE_ID`, `GEMMA31B_DRIVE_ID`, `RVN27B_DRIVE_ID`, `GLM53_DRIVE_ID`, `WEBUI_SYSTEM_PROMPT`, `COLAB_NOTEBOOKS_DIR`, `NOVEL_ROOT`, `COLAB_BROWSERMCP_BRIDGE`. Resolution order is `.secrets.json`, then environment, then a placeholder (empty for optional settings). Other tunables:
@@ -261,7 +261,7 @@ Division of labour: new instance or new model -> this repo's `colab_cli.py start
 | Instance vanishes after 20-35 minutes | The heartbeat process is not running (PC slept or it was killed); check with `status`, `start`/`launch` is what spawns it |
 | Still active or `[?]` after `stop --all` | In order: (1) the Colab-yoga bridge `stop_all` (`stop --all` already tries it; by hand: `runtime\python.exe -u bridge\colab_yoga_bridge.py stop_all`); (2) end the sessions by hand in Colab's web UI (Runtime, Manage sessions); (3) the browser driver `python -X utf8 scripts/colab_sync.py --release-all` (install Playwriter or similar first, see the fallback track). Verify with `status` |
 | Domain times out | A fresh Service approval takes a few to ten-odd seconds, retry; confirm Tailscale >= 1.78, MagicDNS and HTTPS Certificates are on in the DNS settings, and `autoApprovers.services` is in the ACL |
-| WebUI MCP card shows `proxy error: Failed to read connection` | The runtime side of the tunnel is up but nothing answers on the host's `:3426`: run `python -X utf8 scripts/local_novel_mcp.py` on the `local_tailscale_ip` machine, then press refresh on the card. If you autostart it from a drive that mounts after login (a cloud-drive letter, say), have the startup entry wait for the file first. Launching twice is safe: a second launch prints `already running` and exits, and a port held by another program makes it exit with an error |
+| WebUI MCP connection fails | Start the PC bridge with `python -X utf8 scripts/local_mcp.py start` or the Colab-yoga MCP card. A 401 means the private client Bearer header is missing or wrong. A port conflict names the other service and leaves it running |
 
 The full runbook, including how to onboard a model, is in [`SKILL.md`](SKILL.md) section 7 onward.
 
@@ -274,6 +274,37 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 ```
 
 `--sanitized` fills every sensitive field with a placeholder and ignores `.secrets.json` and the environment. It refuses to combine with `--sync-colab`, so a placeholder notebook can never be pushed to Colab.
+
+## Local tools bridge (local_mcp)
+
+The bridge calls the installed Pi's `createCodingTools(cwd)` directly for native `read`, `write`, `edit`, and `bash`. Partial reads, image attachments, truncation, exact multi-edits, command timeouts, and argument coercion use Pi's implementations. Tools run with the logged-in user's permissions; cwd is a default, not a sandbox. Pi session skills, rules, and approval hooks are not loaded automatically.
+
+Install Node.js as required by Pi and Pi itself (`npm i -g @earendil-works/pi-coding-agent`), then run locally:
+
+```bash
+python -X utf8 scripts/local_mcp.py start
+python -X utf8 scripts/local_mcp.py status
+python -X utf8 scripts/local_mcp.py stop
+```
+
+First start creates `~/.config/colab-cli/local-mcp.json` with a dedicated random token and `cwd`; existing choices are preserved. Initial cwd comes from `LOCAL_MCP_CWD`, with `NOVEL_ROOT` / `novel_root` compatibility, then an existing Documents directory. Restart after editing the config. Logs go to neighboring `local-mcp.log`, without tokens or command bodies.
+
+With `local_tailscale_ip` configured, generated WebUI defaults contain a `local_mcp` entry at `http://127.0.0.1:3426/mcp` using the cloud proxy. Once per browser, add `Authorization: Bearer <token from local-mcp.json>` in the client's private MCP settings. The browser retains it. Real tokens never enter notebooks, runners, or anonymous `/props` defaults, and are separate from llama-server's `api_key`.
+
+The service listens on all local adapters on port 3426; the cloud-to-PC link is encrypted by Tailscale. Missing or wrong tokens receive 401 on `/mcp`; anonymous `/health` reveals only identity. Startup waits for readiness and reuses one instance across repeated or concurrent requests. Stop verifies authentication and PID, leaving unrelated port holders alone.
+
+Colab CLI starts the bridge with keepalive. [Colab-yoga v0.5.0+](https://github.com/incredible404-rgb/Colab-yoga) starts it on wake, checks and recovers it every 60 seconds during an active session, and offers a manual **Start** button that does not wake a GPU. Automatic shutdown requires confirmation that the account has no active assignments; failed account checks leave the shared bridge running.
+
+The old `local_novel_mcp.py` remains available. Stop it before upgrading to free port 3426. Replace old `local_novel_fs` entries, `read_novel_file`-style tool names, and `skill:name` paths with the four native tools and real file paths in private client settings and prompts. To roll back, stop the new bridge and run the legacy script.
+
+Isolated checks use temporary files and a free port without allocating a GPU:
+
+```bash
+cd scripts
+python -X utf8 -m unittest discover -p 'test_*.py'
+node check_local_mcp.mjs <absolute-path-to-local_mcp.py>
+python -X utf8 check_local_mcp_concurrency.py <absolute-path-to-local_mcp.py>
+```
 
 ## Repository layout
 
@@ -292,7 +323,8 @@ python -X utf8 scripts/make_g4_huihui_v2_notebook.py --sanitized --output-dir di
 | `scripts/colab_sync.py` | FALLBACK: push/run cells in Colab Web (BrowserMCP→Playwriter→PW), /tun/m release |
 | `scripts/colab_meter.py` | FALLBACK: zero-OAuth status / start / stop CLI with two-track CU bill |
 | `scripts/colab_pw.mjs` | Playwriter fallback backend (supports the __ANY__ tab mode) |
-| `scripts/local_novel_mcp.py` | local Windows directory MCP server bridged into the Colab WebUI |
+| `scripts/local_mcp.py` / `.mjs` | Token-protected Pi-native tools and lifecycle helper |
+| `scripts/local_novel_mcp.py` | Legacy novel tools retained for compatibility |
 | `scripts/secrets_config.py` | .secrets.json / env / placeholder loader; example placeholders always count as "not filled in" |
 | `scripts/stdio_utf8.py` | forces stdout/stderr to UTF-8, shared by the entry-point scripts |
 | `scripts/parallel_download.py` | multi-process downloader reference |

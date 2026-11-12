@@ -25,7 +25,7 @@ Colab 的可用 GPU、每小时 CU 消耗和套餐额度会变化。估算前先
 
 ## 本仓库的 G4 费率（向用户确认花钱时要报的数）
 
-G4（RTX PRO 6000 96GB）实测约 **10 CU/小时**：`debug-runs/2026-11-07-start.log` 与 `debug-runs/2026-11-07-g4-kernel-beat-start.log` 的 `start OK` 行都是 `rate 10.05 CU/h`。冷启动实测 111～140 秒（同两份日志的 `start OK in 111s` / `140s`，模型 `qwen38-fn`），换更大或更慢下载的权重会更久，这段同样计费。
+G4（RTX PRO 6000 96GB）实测约 **10 CU/小时**：[v1.0.1 启动记录](https://github.com/incredible404-rgb/colab-gpu-llm-service/blob/v1.0.1/debug-runs/2026-11-07-start.log) 与 [v1.0.1 心跳启动记录](https://github.com/incredible404-rgb/colab-gpu-llm-service/blob/v1.0.1/debug-runs/2026-11-07-g4-kernel-beat-start.log) 的 `start OK` 行都是 `rate 10.05 CU/h`。冷启动实测 111～140 秒（同两份日志的 `start OK in 111s` / `140s`，模型 `qwen38-fn`），换更大或更慢下载的权重会更久，这段同样计费。
 
 ```text
 用 1 小时   ≈ 10 + 启动 (2～15 分钟 × 10/60 ≈ 0.3～2.5) ≈ 10～13 CU

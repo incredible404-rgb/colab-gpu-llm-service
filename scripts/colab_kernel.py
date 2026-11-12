@@ -512,9 +512,9 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     slug = spec['slug']
     root_dir = spec['root_dir']
 
-    files_note = '与本机文件直通' if mcp_ip else ''
+    files_note = '与本机 MCP 桥直通' if mcp_ip else ''
     prompt_note = '自动加载配置的 System Prompt、' if system_prompt else ''
-    bridge_note = '，并通过 Tailscale SOCKS5 隧道直连本机文件目录（`local_novel_fs` 工具可在 WebUI 输入框一键开关）' if mcp_ip else ''
+    bridge_note = '，并通过 Tailscale SOCKS5 隧道直连本机 MCP 桥（`local_mcp` 的 read/write/edit/bash 工具可在 WebUI 输入框一键开关）' if mcp_ip else ''
     overview_md = f"""# {spec['title']}
 
 - **模型别名**：`{alias}`（262,144 上下文 / 65,536 最大输出 / 16–64 GiB Prompt Cache + 槽位持久化）
@@ -548,13 +548,13 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     }
     if system_prompt:
         ui_cfg_dict = {'systemMessage': system_prompt, 'showSystemMessage': True, **ui_cfg_dict}
-    if mcp_ip:  # no file bridge configured = no WebUI tool entry that could only fail to connect
+    if mcp_ip:  # /props exposes these defaults; configure Authorization only in the client's private settings
         ui_cfg_dict['mcpServers'] = json.dumps(
             [
                 {
-                    'id': 'local-novel-fs',
-                    'name': 'local_novel_fs',
-                    'displayName': '本机文件目录 (local_novel_fs)',
+                    'id': 'local_mcp',
+                    'name': 'local_mcp',
+                    'displayName': 'local_mcp',
                     'url': f'http://127.0.0.1:{LOCAL_MCP_PORT}/mcp',
                     'enabled': True,
                     'useProxy': True,
@@ -587,7 +587,7 @@ MODEL_ALIAS = SPEC['alias']
 KEY_FILE = ROOT / '.llama-api-key'
 PORT = 8081
 KEY = {json.dumps(api_key)}
-LOCAL_MCP_IP = {json.dumps(mcp_ip)}  # Tailscale IP of the PC running local_novel_mcp.py; '' = no file bridge
+LOCAL_MCP_IP = {json.dumps(mcp_ip)}  # Tailscale IP of the PC running local_mcp; '' = no bridge
 FILES = SPEC['files']
 CPP_TAG = 'b12032'
 CPP_URL = 'https://github.com/ggml-org/llama.cpp/releases/download/' + CPP_TAG

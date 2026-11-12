@@ -36,6 +36,13 @@ CFG = {
 PLACEHOLDER_FILE = {'tailnet_fqdn': 'qwen.<YOUR_TAILNET>.ts.net', 'api_key': '<YOUR_LLAMA_API_KEY>'}
 
 
+def setUpModule():
+    # Lifecycle integration has its own isolated tests; these offline suites must not stop the user's bridge.
+    patcher = mock.patch.object(colab_cli, 'local_mcp', return_value={'ok': True})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 def quiet():
     return contextlib.redirect_stdout(io.StringIO())
 
