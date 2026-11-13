@@ -493,6 +493,7 @@ class LaunchDetachTests(unittest.TestCase):
             self.assertTrue(Path(argv[0]).name.startswith('python'))
         self.assertEqual(argv[-3:], ['qwen38-fn-nl', '45', 'breakaway'])
 
+    @unittest.skipIf(os.name == 'nt', 'pathlib cannot build POSIX paths on Windows')
     def test_cli_pythons_and_posix_keepalive_spawn_and_stop(self):
         with tempfile.TemporaryDirectory() as td:
             uv_tools = Path(td) / 'uv-tools'
@@ -538,10 +539,9 @@ class LaunchDetachTests(unittest.TestCase):
             with mock.patch.object(colab_cli.sys, 'platform', 'darwin'), \
                  mock.patch.object(colab_cli.shutil, 'which', return_value=None), \
                  mock.patch.object(colab_cli.Path, 'home', return_value=Path(td)):
-                # Only ~/Applications exists in td unless /Applications also has Tailscale installed on host;
-                # patch is_file selectively if host /Applications/Tailscale.app is installed.
                 found = colab_cli._tailscale_exe()
-                self.assertTrue(found and found.endswith('Tailscale.app/Contents/MacOS/Tailscale'))
+                # /Applications is probed first, so a Tailscale installed on this Mac may be the match
+                self.assertEqual(Path(found or '').parts[-4:], ('Tailscale.app', 'Contents', 'MacOS', 'Tailscale'))
 
     def test_schtasks_command_fits_tr_limit(self):
         tr = subprocess.list2cmdline(colab_cli.keepalive_argv('ka-cpu-test', 45, 'schtasks'))

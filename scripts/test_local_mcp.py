@@ -155,6 +155,7 @@ class LocalMcpBindAndPrerequisiteTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'LOCAL_MCP_PI_ROOT': str(pkg)}):
             self.assertEqual(m._pi_dir(str(self.root / 'node.exe')), pkg)
 
+    @unittest.skipIf(os.name == 'nt', 'pathlib cannot build POSIX paths on Windows')
     def test_pi_dir_finds_node_prefix_lib_node_modules_on_posix(self):
         prefix = self.root / 'homebrew'
         node_bin = prefix / 'bin' / 'node'
