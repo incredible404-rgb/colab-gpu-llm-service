@@ -52,14 +52,22 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 def _probe_my_drive_notebooks() -> Path | None:
-    """The local 'Colab Notebooks' folder of Google Drive for desktop, found by probing drive letters D..Z for a
-    My Drive root (English name or its zh-CN localization). None when Drive for desktop is not mounted."""
+    """The local 'Colab Notebooks' folder of Google Drive for desktop, found by probing drive letters D..Z on Windows
+    or ~/Library/CloudStorage/GoogleDrive-* on macOS (English name or its zh-CN localization). None when not mounted."""
     roots = ('My Drive', '\u6211\u7684\u4e91\u7aef\u786c\u76d8')  # zh-CN Drive localizes "My Drive"
     for letter in 'DEFGHIJKLMNOPQRSTUVWXYZ':
         for root in roots:
             cand = Path(f'{letter}:/{root}/Colab Notebooks')
             if cand.exists():
                 return cand
+    if sys.platform == 'darwin':
+        cloud_storage = Path.home() / 'Library/CloudStorage'
+        if cloud_storage.is_dir():
+            for mount in sorted(cloud_storage.glob('GoogleDrive-*')):
+                for root in roots:
+                    cand = mount / root / 'Colab Notebooks'
+                    if cand.exists():
+                        return cand
     return None
 
 
@@ -82,10 +90,11 @@ LOCAL_MCP_PORT = 3426
 
 
 def _drivefs_db() -> Path | None:
-    """DriveFS metadata DB of this Windows account (DRIVEFS_DB overrides; else the most recently used profile)."""
+    """DriveFS metadata DB of this account (DRIVEFS_DB overrides; else the most recently used profile)."""
     if os.environ.get('DRIVEFS_DB'):
         return Path(os.environ['DRIVEFS_DB'])
-    base = Path(os.environ.get('LOCALAPPDATA', str(Path.home() / 'AppData/Local'))) / 'Google/DriveFS'
+    default_local = Path.home() / ('Library/Application Support' if sys.platform == 'darwin' else 'AppData/Local')
+    base = Path(os.environ.get('LOCALAPPDATA', str(default_local))) / 'Google/DriveFS'
     dbs = sorted(base.glob('*/metadata_sqlite_db'), key=lambda p: p.stat().st_mtime, reverse=True)
     return dbs[0] if dbs else None
 
@@ -1944,9 +1953,9 @@ YOGA_MCP_BRIDGE_NAME = 'local_mcp_bridge.json'
 def yoga_runners_path() -> Path:
     """Where Colab-yoga reads its runners.
 
-    $COLAB_YOGA_DIR/colab_kernel_runners.json when set; else %LOCALAPPDATA%/Colab-yoga/colab_kernel_runners.json,
-    the per-user data dir every Colab-yoga build (installed or portable) reads; without LOCALAPPDATA, the
-    default install dir ~/AppData/Local/Programs/Colab-yoga.
+    $COLAB_YOGA_DIR/colab_kernel_runners.json when set; else %LOCALAPPDATA%/Colab-yoga/colab_kernel_runners.json
+    when LOCALAPPDATA is set; on macOS, ~/Library/Application Support/Colab-yoga/colab_kernel_runners.json;
+    otherwise the default install dir ~/AppData/Local/Programs/Colab-yoga (or XDG_DATA_HOME/Programs/Colab-yoga).
     """
     base = os.environ.get('COLAB_YOGA_DIR')
     if base:
@@ -1954,23 +1963,34 @@ def yoga_runners_path() -> Path:
     local = os.environ.get('LOCALAPPDATA')
     if local:
         return Path(local) / 'Colab-yoga' / YOGA_RUNNERS_NAME
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library/Application Support' / 'Colab-yoga' / YOGA_RUNNERS_NAME
+    if sys.platform != 'win32':
+        xdg = os.environ.get('XDG_DATA_HOME') or str(Path.home() / '.local/share')
+        return Path(xdg) / 'Programs' / 'Colab-yoga' / YOGA_RUNNERS_NAME
     return Path.home() / 'AppData/Local' / 'Programs' / 'Colab-yoga' / YOGA_RUNNERS_NAME
 
 
 def _yoga_dir_created_on_demand() -> bool:
-    """True when the default runners dir is created if missing: COLAB_YOGA_DIR or a non-empty LOCALAPPDATA."""
-    return bool(os.environ.get('COLAB_YOGA_DIR') or os.environ.get('LOCALAPPDATA'))
+    """True when the default runners dir is created if missing: COLAB_YOGA_DIR, non-empty LOCALAPPDATA,
+    or macOS when ~/Library/Application Support exists."""
+    if os.environ.get('COLAB_YOGA_DIR') or os.environ.get('LOCALAPPDATA'):
+        return True
+    if sys.platform == 'darwin':
+        return (Path.home() / 'Library/Application Support').is_dir()
+    return False
 
 
 def yoga_legacy_runner_copies(primary: Path) -> list[Path]:
     """Older runners files Colab-yoga might read alongside or before the primary one; refreshed only when already present.
 
-    %LOCALAPPDATA%/Programs/Colab-yoga/colab_kernel_runners.json and the "appDir" of
-    %LOCALAPPDATA%/Colab-yoga/install.json, each only when a runners file already sits there so no extra
-    key-bearing copy is created. Empty with COLAB_YOGA_DIR.
+    <local>/Programs/Colab-yoga/colab_kernel_runners.json and the "appDir" of <local>/Colab-yoga/install.json,
+    each only when a runners file already sits there so no extra key-bearing copy is created. Empty with COLAB_YOGA_DIR.
     """
-    local = os.environ.get('LOCALAPPDATA')
-    if os.environ.get('COLAB_YOGA_DIR') or not local:
+    if os.environ.get('COLAB_YOGA_DIR'):
+        return []
+    local = os.environ.get('LOCALAPPDATA') or (str(Path.home() / 'Library/Application Support') if sys.platform == 'darwin' else '')
+    if not local:
         return []
     found = []
     programs_file = Path(local) / 'Programs' / 'Colab-yoga' / YOGA_RUNNERS_NAME
@@ -2003,8 +2023,10 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
     dst = out_path or yoga_runners_path()
     create = out_path is None and _yoga_dir_created_on_demand()
     if not create and not dst.parent.exists():
+        install_hint = ('~/Library/Application Support/Programs/Colab-yoga'
+                        if sys.platform == 'darwin' else r'%LOCALAPPDATA%\Programs\Colab-yoga')
         print(f'Colab-yoga not installed ({dst.parent} missing); skipped exporting runners. '
-              'Install it to %LOCALAPPDATA%\\Programs\\Colab-yoga, or unzip it anywhere and set COLAB_YOGA_DIR to that '
+              f'Install it to {install_hint}, or unzip it anywhere and set COLAB_YOGA_DIR to that '
               'folder, then re-run `python -X utf8 scripts/colab_kernel.py --all`. '
               'Optional app: https://github.com/incredible404-rgb/Colab-yoga')
         return False

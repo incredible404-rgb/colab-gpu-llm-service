@@ -87,7 +87,13 @@ function resolvePiDir() {
 		roots.push(join(dirname(process.execPath), 'node_modules'));
 	} else {
 		if (process.env.npm_config_prefix) roots.push(join(process.env.npm_config_prefix, 'lib', 'node_modules'));
-		roots.push('/usr/local/lib/node_modules', '/usr/lib/node_modules', join(homedir(), '.npm-global', 'lib', 'node_modules'));
+		roots.push(
+			join(dirname(dirname(process.execPath)), 'lib', 'node_modules'),
+			'/opt/homebrew/lib/node_modules',
+			'/usr/local/lib/node_modules',
+			'/usr/lib/node_modules',
+			join(homedir(), '.npm-global', 'lib', 'node_modules'),
+		);
 	}
 	for (const entry of (process.env.NODE_PATH || '').split(delimiter)) {
 		if (entry) roots.push(entry);

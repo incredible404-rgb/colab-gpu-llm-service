@@ -27,7 +27,7 @@ description: 在 Google Colab 付费 GPU（默认 G4 RTX PRO 6000 96GB）上部�
 | 官方 Colab CLI | **google-colab-cli 0.7.5**（需 Python ≥ 3.12，`uv tool install` 自动管理，或复用 Colab-yoga 内置 Python），固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
 | Tailscale | 本机已安装并登录（客户端 ≥ 1.78）；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签、OAuth 客户端，并在 DNS 设置里开启 **MagicDNS** 与 **HTTPS Certificates** | `tailscale version` |
 | HF 令牌（可选） | 现役 4 个模型都是公开权重，不需要；仅受限/限速模型才用；本机 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 会被自动转发到运行时 | |
-| Colab-yoga（可选） | Windows 托盘 GPU 管理台，只管 LLM 服务（不含视频/生图/ComfyUI）：查看状态与 CU、空闲倒计时续时、切换模型、释放运行时。与本技能共用同一台 G4，不装不影响任何核心命令 | `python -X utf8 scripts/colab_cli.py yoga status` |
+| Colab-yoga（可选） | Windows 托盘 / macOS 菜单栏 GPU 管理台，只管 LLM 服务（不含视频/生图/ComfyUI）：查看状态与 CU、空闲倒计时续时、切换模型、释放运行时。与本技能共用同一台 G4，不装不影响任何核心命令 | `python -X utf8 scripts/colab_cli.py yoga status` |
 | 浏览器驱动（可选） | 仅后备轨道（网页同步、零 OAuth 查账与强杀）需要：Node.js + 已登录 Google 的 Edge，再装 Playwriter 或 `@playwright/cli`，命令见第 6 节 | |
 
 安装官方 CLI（agent 可直接执行，不需要重开终端；`uv` 也可以用 `winget install astral-sh.uv` 装）：
@@ -175,7 +175,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
 
 Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runners.json`（含真实密钥，不提交、不外传）。链路最常断在“目录没装对”，按下面做：
 
-1. 安装版装到 `%LOCALAPPDATA%\Programs\Colab-yoga`，免安装版解压到任意目录，都不用设环境变量：runners 默认写到 Colab-yoga 的用户数据目录 `%LOCALAPPDATA%\Colab-yoga`（不存在自动创建），并刷新 `%LOCALAPPDATA%\Programs\Colab-yoga` 或 `install.json` 的 `appDir` 里已有的旧副本；同目录写 `local_mcp_bridge.json`（`{"script": "<本仓库 scripts/local_mcp.py 绝对路径>"}`），克隆在任意目录都能被 Colab-yoga 发现。只有想放到别处时才设 `COLAB_YOGA_DIR`（以它为准，用户级环境变量新开的进程才生效）。
+1. 安装版装到 `%LOCALAPPDATA%\Programs\Colab-yoga`（macOS：`~/Library/Application Support/Programs/Colab-yoga`），免安装版解压到任意目录，都不用设环境变量：runners 默认写到 Colab-yoga 的用户数据目录 `%LOCALAPPDATA%\Colab-yoga`（macOS：`~/Library/Application Support/Colab-yoga`，不存在自动创建），并刷新 `%LOCALAPPDATA%\Programs\Colab-yoga`（macOS：`~/Library/Application Support/Programs/Colab-yoga`）或 `install.json` 的 `appDir` 里已有的旧副本；同目录写 `local_mcp_bridge.json`（`{"script": "<本仓库 scripts/local_mcp.py 绝对路径>"}`），克隆在任意目录都能被 Colab-yoga 发现。只有想放到别处时才设 `COLAB_YOGA_DIR`（以它为准，用户级环境变量新开的进程才生效）。
 2. 运行 `python -X utf8 scripts/colab_kernel.py --all`，在输出里确认有一行 `Exported Colab-yoga runners to: <路径>`。若出现 `skipped exporting runners`，说明 `LOCALAPPDATA` 与 `COLAB_YOGA_DIR` 都没设且安装目录不存在，回到第 1 步；若出现 `Refused to export Colab-yoga runners: missing ...`（退出码 1），说明必填四项里还有没填的，先补 `.secrets.json` / 环境变量，不会写出带占位符的 runners。
 3. 改了 `.secrets.json`（密钥、tailnet、文件桥 IP、系统提示）之后必须重跑第 2 步，runners 里的值是生成时写死的。
 

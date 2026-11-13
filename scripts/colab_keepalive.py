@@ -104,6 +104,8 @@ def schtasks_task_name(session: str) -> str:
 
 def delete_schtask(session: str) -> None:
     """Drop the one-shot launcher task. Safe while this process is still running."""
+    if os.name != 'nt':
+        return
     subprocess.run(
         ['schtasks', '/Delete', '/F', '/TN', schtasks_task_name(session)],
         capture_output=True)

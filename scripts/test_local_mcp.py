@@ -155,6 +155,18 @@ class LocalMcpBindAndPrerequisiteTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'LOCAL_MCP_PI_ROOT': str(pkg)}):
             self.assertEqual(m._pi_dir(str(self.root / 'node.exe')), pkg)
 
+    def test_pi_dir_finds_node_prefix_lib_node_modules_on_posix(self):
+        prefix = self.root / 'homebrew'
+        node_bin = prefix / 'bin' / 'node'
+        pkg = prefix / 'lib' / 'node_modules' / '@earendil-works' / 'pi-coding-agent'
+        node_bin.parent.mkdir(parents=True)
+        node_bin.write_text('', encoding='utf-8')
+        pkg.mkdir(parents=True)
+        (pkg / 'package.json').write_text('{}', encoding='utf-8')
+        env = {k: v for k, v in os.environ.items() if k not in ('LOCAL_MCP_PI_ROOT', 'npm_config_prefix')}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m.os, 'name', 'posix'):
+            self.assertEqual(m._pi_dir(str(node_bin)), pkg.resolve())
+
     def test_large_log_keeps_only_its_tail(self):
         log = self.root / 'log.txt'
         log.write_bytes(b'old line\n' * 200_000)  # ~1.8 MB

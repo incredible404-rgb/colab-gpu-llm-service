@@ -34,7 +34,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from secrets_config import optional_setting  # noqa: E402
 from stdio_utf8 import force_utf8  # noqa: E402
 
-CLI_JS = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'npm/node_modules/@playwright/cli/playwright-cli.js'
+def _resolve_playwright_cli_js() -> Path:
+    if os.name == 'nt':
+        return Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'npm/node_modules/@playwright/cli/playwright-cli.js'
+    roots = []
+    if os.environ.get('npm_config_prefix'):
+        roots.append(Path(os.environ['npm_config_prefix']) / 'lib/node_modules')
+    roots += [Path('/opt/homebrew/lib/node_modules'), Path('/usr/local/lib/node_modules'),
+              Path('/usr/lib/node_modules'), Path.home() / '.npm-global/lib/node_modules']
+    for root in roots:
+        cand = root / '@playwright/cli/playwright-cli.js'
+        if cand.is_file():
+            return cand
+    return roots[0] / '@playwright/cli/playwright-cli.js'
+
+
+CLI_JS = _resolve_playwright_cli_js()
 CLI_TIMEOUT = 120  # the bridge hangs forever when it drops, so every call needs an upper bound
 PW_HELPER = Path(__file__).with_name('colab_pw.mjs')
 # Optional first tier. Nothing is assumed about where (or whether) a BrowserMCP bridge script lives.

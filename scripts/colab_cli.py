@@ -52,10 +52,12 @@ code page never turns an echoed kernel line into a UnicodeEncodeError while a GP
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -85,11 +87,31 @@ def __getattr__(name):
     return mod if name == module else getattr(mod, name)
 
 
+def _cli_pythons() -> tuple[Path, Path]:
+    if os.name == 'nt':
+        pyw = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'uv/tools/google-colab-cli/Scripts/pythonw.exe'
+        return pyw, pyw.with_name('python.exe')  # same venv, with a console (stdout is read)
+    roots = []
+    if os.environ.get('UV_TOOL_DIR'):
+        roots.append(Path(os.environ['UV_TOOL_DIR']))
+    if os.environ.get('XDG_DATA_HOME'):
+        roots.append(Path(os.environ['XDG_DATA_HOME']) / 'uv/tools')
+    roots.append(Path.home() / '.local/share/uv/tools')
+    if sys.platform == 'darwin':
+        roots.append(Path.home() / 'Library/Application Support/uv/tools')
+    for root in roots:
+        for name in ('python3', 'python'):
+            cand = root / 'google-colab-cli/bin' / name
+            if cand.exists():
+                return cand, cand
+    default = roots[0] / 'google-colab-cli/bin/python3'
+    return default, default
+
+
 CONSOLE_MARKER = '就绪横幅 + WebUI 标签页 + 停机按钮'
 ENV = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
 CLI_DIR = Path.home() / '.config/colab-cli'
-CLI_PYTHONW = Path(os.environ.get('APPDATA', str(Path.home() / 'AppData/Roaming'))) / 'uv/tools/google-colab-cli/Scripts/pythonw.exe'
-CLI_PYTHON = CLI_PYTHONW.with_name('python.exe')  # same venv, with a console (stdout is read)
+CLI_PYTHONW, CLI_PYTHON = _cli_pythons()
 KEEPALIVE = Path(__file__).with_name('colab_keepalive.py')
 # local_mcp.py: the Pi-native read/write/edit/bash bridge this CLI starts and stops with a GPU session.
 # local_novel_mcp.py: the standalone novel-folder tool server, run by hand; this CLI never launches it.
@@ -210,9 +232,14 @@ def _pid_alive(pid: int) -> bool:
         try:
             return _win_pid_alive(pid)
         except Exception:  # no ctypes / odd Python build: fall back to the slow, always-available probe
-            pass
-    out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % pid, '/NH'], capture_output=True, text=True, errors='replace').stdout
-    return str(pid) in out
+            out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % pid, '/NH'],
+                                 capture_output=True, text=True, errors='replace').stdout
+            return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except OSError as err:
+        return err.errno == errno.EPERM
+    return True
 
 
 def keepalive_task_name(session: str) -> str:
@@ -321,26 +348,35 @@ def start_keepalive(session: str, idle_min: int):
         (CLI_DIR / ('keepalive-%s.json' % session)).unlink(missing_ok=True)
     if not CLI_PYTHONW.exists():
         raise SystemExit('colab CLI interpreter not found at %s (install with: %s)' % (CLI_PYTHONW, INSTALL_HINT))
-    flags = (getattr(subprocess, 'DETACHED_PROCESS', 0)
-             | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-             | CREATE_BREAKAWAY_FROM_JOB)
-    spawn = 'breakaway'
-    proc = None
-    try:
-        proc = subprocess.Popen(
-            keepalive_argv(session, idle_min, 'breakaway'), env=ENV, creationflags=flags,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
-    except OSError as err:
-        print('[colab_cli] breakaway spawn failed (%s); using schtasks' % err, flush=True)
+    if os.name != 'nt':
+        spawn = 'setsid'
+        try:
+            subprocess.Popen(
+                keepalive_argv(session, idle_min, spawn), env=ENV, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError as err:
+            raise SystemExit('keep-alive spawn failed: %s' % err)
+    else:
+        flags = (getattr(subprocess, 'DETACHED_PROCESS', 0)
+                 | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
+                 | CREATE_BREAKAWAY_FROM_JOB)
+        spawn = 'breakaway'
         proc = None
-    if proc is not None:
-        time.sleep(1.0)
-        if proc.poll() is not None:
-            print('[colab_cli] breakaway process exited %s; using schtasks' % proc.returncode, flush=True)
+        try:
+            proc = subprocess.Popen(
+                keepalive_argv(session, idle_min, 'breakaway'), env=ENV, creationflags=flags,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError as err:
+            print('[colab_cli] breakaway spawn failed (%s); using schtasks' % err, flush=True)
             proc = None
-    if proc is None:
-        spawn = 'schtasks'
-        _schtasks_spawn(session, idle_min)
+        if proc is not None:
+            time.sleep(1.0)
+            if proc.poll() is not None:
+                print('[colab_cli] breakaway process exited %s; using schtasks' % proc.returncode, flush=True)
+                proc = None
+        if proc is None:
+            spawn = 'schtasks'
+            _schtasks_spawn(session, idle_min)
     st = _wait_keepalive(session, 25)
     if not st:
         log_path = CLI_DIR / ('keepalive-%s.log' % session)
@@ -358,6 +394,8 @@ def start_keepalive(session: str, idle_min: int):
 
 def delete_keepalive_task(session: str):
     """Remove the one-shot Task Scheduler entry. Does not kill a process it already started."""
+    if os.name != 'nt':
+        return
     subprocess.run(
         ['schtasks', '/Delete', '/F', '/TN', keepalive_task_name(session)],
         capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -395,6 +433,8 @@ def stop_targets(names: list[str], live_sessions: list[str], scheduled: list[str
 
 
 def _schtasks_query_text() -> str:
+    if os.name != 'nt':
+        return ''
     queried = subprocess.run(
         ['schtasks', '/Query', '/FO', 'CSV'],
         capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -403,8 +443,23 @@ def _schtasks_query_text() -> str:
 
 def stop_keepalive(session: str):
     st = keepalive_state(session)
-    if st and _pid_alive(int(st.get('pid') or 0)):
-        subprocess.run(['taskkill', '/F', '/PID', str(st['pid'])], capture_output=True)
+    pid = int(st.get('pid') or 0) if st else 0
+    if pid > 0 and _pid_alive(pid):
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and _pid_alive(pid):
+                time.sleep(0.05)
+            if _pid_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
     delete_keepalive_task(session)
     (CLI_DIR / ('keepalive-%s.json' % session)).unlink(missing_ok=True)
     if not keepalive_state_sessions():
@@ -431,6 +486,11 @@ def _tailscale_exe() -> str | None:
     found = shutil.which('tailscale')
     if found:
         return found
+    if sys.platform == 'darwin':
+        for app_root in (Path('/Applications'), Path.home() / 'Applications'):
+            cand = app_root / 'Tailscale.app/Contents/MacOS/Tailscale'
+            if cand.is_file():
+                return str(cand)
     for var in ('ProgramFiles', 'ProgramW6432'):
         base = os.environ.get(var)
         cand = Path(base) / 'Tailscale' / 'tailscale.exe' if base else None
@@ -950,16 +1010,28 @@ def cmd_stop(names: list[str]):
     return 0 if u['active'] == 0 else 1
 
 
+def _default_local_appdata() -> Path:
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        return Path(local)
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library/Application Support'
+    if os.name != 'nt':
+        return Path(os.environ.get('XDG_DATA_HOME') or str(Path.home() / '.local/share'))
+    return Path.home() / 'AppData/Local'
+
+
 def resolve_yoga_dir() -> Path:
     """Colab-yoga (https://github.com/incredible404-rgb/Colab-yoga) app dir, first match wins.
 
-    1) COLAB_YOGA_DIR; 2) "appDir" of %LOCALAPPDATA%/Colab-yoga/install.json when it holds
-    bridge/colab_yoga_bridge.py (portable build unzipped anywhere); 3) %LOCALAPPDATA%/Programs/Colab-yoga.
+    1) COLAB_YOGA_DIR; 2) "appDir" of <local>/Colab-yoga/install.json when it holds
+    bridge/colab_yoga_bridge.py (portable build unzipped anywhere); 3) <local>/Programs/Colab-yoga
+    (<local> is %LOCALAPPDATA% on Windows, ~/Library/Application Support on macOS).
     """
     env = os.environ.get('COLAB_YOGA_DIR')
     if env:
         return Path(env)
-    local = Path(os.environ.get('LOCALAPPDATA') or str(Path.home() / 'AppData/Local'))
+    local = _default_local_appdata()
     try:
         app_dir = json.loads((local / 'Colab-yoga' / 'install.json').read_text(encoding='utf-8')).get('appDir')
     except (OSError, ValueError, AttributeError):
@@ -971,8 +1043,15 @@ def resolve_yoga_dir() -> Path:
 
 # Resolved once at import; tests patch YOGA_DIR / YOGA_EXE / YOGA_PY / YOGA_BRIDGE directly.
 YOGA_DIR = resolve_yoga_dir()
-YOGA_EXE = YOGA_DIR / 'Colab-yoga.exe'
-YOGA_PY = YOGA_DIR / 'runtime/python.exe'
+if sys.platform == 'darwin':
+    YOGA_EXE = YOGA_DIR / 'Colab-yoga.app'
+    YOGA_PY = YOGA_DIR / 'runtime/bin/python3'
+elif os.name != 'nt':
+    YOGA_EXE = YOGA_DIR / 'Colab-yoga'
+    YOGA_PY = YOGA_DIR / 'runtime/bin/python3'
+else:
+    YOGA_EXE = YOGA_DIR / 'Colab-yoga.exe'
+    YOGA_PY = YOGA_DIR / 'runtime/python.exe'
 YOGA_BRIDGE = YOGA_DIR / 'bridge/colab_yoga_bridge.py'
 # Name under which the Colab-yoga bridge registers its session in ~/.config/colab-cli/sessions.json.
 # Its current build still writes 'easycolab' (an inherited string, not an install path); both are accepted.
@@ -996,16 +1075,21 @@ def wake_succeeded(text: str) -> bool:
 
 def cmd_yoga(rest: list[str]) -> int:
     if not YOGA_EXE.exists():
+        install_loc = ('~/Library/Application Support/Programs/Colab-yoga'
+                       if sys.platform == 'darwin' else r'%LOCALAPPDATA%\Programs\Colab-yoga')
         raise SystemExit(
             'Colab-yoga not found at %s\n'
-            'Install it from https://github.com/incredible404-rgb/Colab-yoga (Windows tray app; it installs to '
-            '%%LOCALAPPDATA%%\\Programs\\Colab-yoga), or set COLAB_YOGA_DIR to an existing install. '
-            'Colab-yoga is optional: start/launch/status/stop work without it.' % YOGA_EXE)
+            'Install it from https://github.com/incredible404-rgb/Colab-yoga (tray app; it installs to '
+            '%s), or set COLAB_YOGA_DIR to an existing install. '
+            'Colab-yoga is optional: start/launch/status/stop work without it.' % (YOGA_EXE, install_loc))
     opt = lambda flag, default: rest[rest.index(flag) + 1] if flag in rest else default  # noqa: E731
     pos = [a for i, a in enumerate(rest) if not a.startswith('-') and (i == 0 or rest[i - 1] not in ('--gpu', '--idle-min'))]
     sub = pos[0] if pos else 'gui'
     if sub == 'gui':
-        subprocess.Popen([str(YOGA_EXE)], cwd=str(YOGA_DIR))
+        if sys.platform == 'darwin' and YOGA_EXE.suffix == '.app':
+            subprocess.Popen(['open', '-a', str(YOGA_EXE)], cwd=str(YOGA_DIR))
+        else:
+            subprocess.Popen([str(YOGA_EXE)], cwd=str(YOGA_DIR))
         print('[colab_cli] Colab-yoga GUI launched (%s)' % YOGA_EXE, flush=True)
         return 0
     if sub == 'status':

@@ -22,9 +22,26 @@ function pixelPNG() {
     pngChunk('IDAT',deflateSync(Buffer.from([0,255,0,0,255]))), pngChunk('IEND',Buffer.alloc(0))]);
 }
 
-const packageRoot = process.env.LOCAL_MCP_PI_ROOT || (process.platform === 'win32'
-  ? join(process.env.APPDATA || join(homedir(), 'AppData/Roaming'), 'npm/node_modules/@earendil-works/pi-coding-agent')
-  : join(process.env.npm_config_prefix || '/usr/local', 'lib/node_modules/@earendil-works/pi-coding-agent'));
+function findPackageRoot() {
+  if (process.env.LOCAL_MCP_PI_ROOT) return process.env.LOCAL_MCP_PI_ROOT;
+  if (process.platform === 'win32') {
+    return join(process.env.APPDATA || join(homedir(), 'AppData/Roaming'), 'npm/node_modules/@earendil-works/pi-coding-agent');
+  }
+  const prefixes = [
+    process.env.npm_config_prefix,
+    join(process.execPath, '..', '..'),
+    '/opt/homebrew',
+    '/usr/local',
+    '/usr',
+    join(homedir(), '.npm-global'),
+  ].filter(Boolean);
+  for (const prefix of prefixes) {
+    const cand = join(prefix, 'lib/node_modules/@earendil-works/pi-coding-agent');
+    if (existsSync(join(cand, 'package.json'))) return cand;
+  }
+  return join(process.env.npm_config_prefix || '/usr/local', 'lib/node_modules/@earendil-works/pi-coding-agent');
+}
+const packageRoot = findPackageRoot();
 const { McpClient, StreamableHttpTransport } = await import(pathToFileURL(join(packageRoot, 'node_modules/@earendil-works/pi-mcp/dist/index.js')).href);
 const launcher = process.argv[2];
 assert(launcher, 'Pass the absolute local_mcp.py path');
@@ -37,8 +54,9 @@ const port = await new Promise(resolve => {
   s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
 });
 const env = { ...process.env, LOCAL_MCP_CONFIG: config, LOCAL_MCP_PORT: String(port), LOCAL_MCP_LOG: join(dir, 'server.log') };
+const pythonBin = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 function lifecycle(command) {
-  const p = spawnSync('python', ['-X', 'utf8', launcher, command], { env, encoding: 'utf8', timeout: 16000, windowsHide: true });
+  const p = spawnSync(pythonBin, ['-X', 'utf8', launcher, command], { env, encoding: 'utf8', timeout: 16000, windowsHide: true });
   const lines = (p.stdout || '').trim().split('\n');
   let result;
   try { result = JSON.parse(lines.at(-1)); } catch { throw new Error(`${command}: no JSON result (${p.error?.message || p.stderr})`); }
