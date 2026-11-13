@@ -403,11 +403,21 @@ class CliStartupAndProbeTests(unittest.TestCase):
 
     def test_pid_alive_falls_back_to_tasklist(self):
         done = subprocess.CompletedProcess([], 0, stdout='python.exe  4242 Console  1  9,000 K\n', stderr='')
-        with mock.patch.object(colab_cli, '_win_pid_alive', side_effect=OSError('no ctypes')), \
+        with mock.patch.object(colab_cli.os, 'name', 'nt'), \
+             mock.patch.object(colab_cli, '_win_pid_alive', side_effect=OSError('no ctypes')), \
              mock.patch.object(colab_cli.subprocess, 'run', return_value=done) as run:
             self.assertTrue(colab_cli._pid_alive(4242))
             self.assertFalse(colab_cli._pid_alive(77))
         self.assertEqual(run.call_args.args[0][:3], ['tasklist', '/FI', 'PID eq 77'])
+
+    def test_posix_pid_alive_treats_eperm_as_alive(self):
+        import errno
+        with mock.patch.object(colab_cli.os, 'name', 'posix'), \
+             mock.patch.object(colab_cli.os, 'kill', side_effect=OSError(errno.EPERM, 'Operation not permitted')):
+            self.assertTrue(colab_cli._pid_alive(4242))
+        with mock.patch.object(colab_cli.os, 'name', 'posix'), \
+             mock.patch.object(colab_cli.os, 'kill', side_effect=OSError(errno.ESRCH, 'No such process')):
+            self.assertFalse(colab_cli._pid_alive(4242))
 
 
 class CliStopOrderingTests(unittest.TestCase):
@@ -477,8 +487,61 @@ class LaunchDetachTests(unittest.TestCase):
     def test_breakaway_flag_and_argv(self):
         self.assertEqual(colab_cli.CREATE_BREAKAWAY_FROM_JOB, 0x01000000)
         argv = colab_cli.keepalive_argv('qwen38-fn-nl', 45, 'breakaway')
-        self.assertTrue(argv[0].lower().endswith('pythonw.exe'))
+        if os.name == 'nt':
+            self.assertTrue(argv[0].lower().endswith('pythonw.exe'))
+        else:
+            self.assertTrue(Path(argv[0]).name.startswith('python'))
         self.assertEqual(argv[-3:], ['qwen38-fn-nl', '45', 'breakaway'])
+
+    def test_cli_pythons_and_posix_keepalive_spawn_and_stop(self):
+        with tempfile.TemporaryDirectory() as td:
+            uv_tools = Path(td) / 'uv-tools'
+            py3 = uv_tools / 'google-colab-cli/bin/python3'
+            py3.parent.mkdir(parents=True)
+            py3.write_text('')
+            with mock.patch.object(colab_cli.os, 'name', 'posix'), \
+                 mock.patch.dict(os.environ, {'UV_TOOL_DIR': str(uv_tools)}):
+                self.assertEqual(colab_cli._cli_pythons(), (py3, py3))
+            cli_dir = Path(td) / 'cli'
+            cli_dir.mkdir()
+            spawned = []
+            with mock.patch.object(colab_cli.os, 'name', 'posix'), \
+                 mock.patch.object(colab_cli, 'CLI_DIR', cli_dir), \
+                 mock.patch.object(colab_cli, 'CLI_PYTHONW', py3), \
+                 mock.patch.object(colab_cli, 'start_novel_mcp'), \
+                 mock.patch.object(colab_cli, 'stop_novel_mcp'), \
+                 mock.patch.object(colab_cli.subprocess, 'Popen', side_effect=lambda *a, **kw: spawned.append((a, kw))), \
+                 mock.patch.object(colab_cli, '_wait_keepalive', return_value={'pid': 5555}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                colab_cli.start_keepalive('sess', 30)
+            self.assertEqual(len(spawned), 1)
+            self.assertTrue(spawned[0][1].get('start_new_session'))
+            self.assertEqual(spawned[0][0][0][-1], 'setsid')
+            (cli_dir / 'keepalive-sess.json').write_text(json.dumps({'pid': 5555}), encoding='utf-8')
+            killed = []
+            alive = [True, False]
+            with mock.patch.object(colab_cli.os, 'name', 'posix'), \
+                 mock.patch.object(colab_cli, 'CLI_DIR', cli_dir), \
+                 mock.patch.object(colab_cli, 'stop_novel_mcp'), \
+                 mock.patch.object(colab_cli, '_pid_alive', side_effect=lambda _: alive.pop(0) if alive else False), \
+                 mock.patch.object(colab_cli.os, 'kill', side_effect=lambda pid, sig: killed.append((pid, sig))), \
+                 mock.patch.object(colab_cli.subprocess, 'run', side_effect=AssertionError('taskkill/schtasks must not run')):
+                colab_cli.stop_keepalive('sess')
+            self.assertEqual(killed, [(5555, colab_cli.signal.SIGTERM)])
+            self.assertFalse((cli_dir / 'keepalive-sess.json').exists())
+
+    def test_macos_tailscale_bundle_discovery(self):
+        with tempfile.TemporaryDirectory() as td:
+            app_bin = Path(td) / 'Applications/Tailscale.app/Contents/MacOS/Tailscale'
+            app_bin.parent.mkdir(parents=True)
+            app_bin.write_text('')
+            with mock.patch.object(colab_cli.sys, 'platform', 'darwin'), \
+                 mock.patch.object(colab_cli.shutil, 'which', return_value=None), \
+                 mock.patch.object(colab_cli.Path, 'home', return_value=Path(td)):
+                # Only ~/Applications exists in td unless /Applications also has Tailscale installed on host;
+                # patch is_file selectively if host /Applications/Tailscale.app is installed.
+                found = colab_cli._tailscale_exe()
+                self.assertTrue(found and found.endswith('Tailscale.app/Contents/MacOS/Tailscale'))
 
     def test_schtasks_command_fits_tr_limit(self):
         tr = subprocess.list2cmdline(colab_cli.keepalive_argv('ka-cpu-test', 45, 'schtasks'))

@@ -288,8 +288,11 @@ def _pi_dir(node: str) -> Path:
     else:
         if os.environ.get('npm_config_prefix'):
             roots.append(Path(os.environ['npm_config_prefix']) / 'lib/node_modules')
-        roots += [Path('/usr/local/lib/node_modules'), Path('/usr/lib/node_modules'),
-                  Path.home() / '.npm-global/lib/node_modules']
+        node_parents = Path(node).resolve().parents
+        if len(node_parents) >= 2:
+            roots.append(node_parents[1] / 'lib/node_modules')
+        roots += [Path('/opt/homebrew/lib/node_modules'), Path('/usr/local/lib/node_modules'),
+                  Path('/usr/lib/node_modules'), Path.home() / '.npm-global/lib/node_modules']
     roots += [Path(entry) for entry in (os.environ.get('NODE_PATH') or '').split(os.pathsep) if entry]
     candidates += [root.joinpath(*PI_PACKAGE) for root in roots]
     for directory in candidates:

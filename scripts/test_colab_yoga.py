@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,7 +42,21 @@ class CliYogaTests(unittest.TestCase):
     def test_no_legacy_install_fallback(self):
         # Only Colab-yoga is probed; the old EasyColab layout must not be consulted any more.
         self.assertFalse(hasattr(colab_cli, 'EASYCOLAB_DIR'))
-        self.assertEqual(colab_cli.YOGA_EXE.name, 'Colab-yoga.exe')
+        expected = 'Colab-yoga.app' if sys.platform == 'darwin' else ('Colab-yoga.exe' if os.name == 'nt' else 'Colab-yoga')
+        self.assertEqual(colab_cli.YOGA_EXE.name, expected)
+
+    def test_macos_gui_launches_app_bundle_via_open(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / 'Colab-yoga.app'
+            app.mkdir()
+            launched = []
+            with mock.patch.object(colab_cli.sys, 'platform', 'darwin'), \
+                    mock.patch.object(colab_cli, 'YOGA_DIR', Path(td)), \
+                    mock.patch.object(colab_cli, 'YOGA_EXE', app), \
+                    mock.patch.object(colab_cli.subprocess, 'Popen', side_effect=lambda argv, **kw: launched.append((argv, kw))), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(colab_cli.cmd_yoga(['gui']), 0)
+            self.assertEqual(launched, [(['open', '-a', str(app)], {'cwd': str(Path(td))})])
 
     def test_wake_keeps_alive_the_yoga_session(self):
         with tempfile.TemporaryDirectory() as td:
@@ -70,9 +85,26 @@ class RunnersExportTests(unittest.TestCase):
 
     def test_without_localappdata_the_install_dir_is_the_fallback(self):
         env = {k: v for k, v in os.environ.items() if k not in ('COLAB_YOGA_DIR', 'LOCALAPPDATA')}
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(ck.sys, 'platform', 'win32'):
             p = ck.yoga_runners_path()
         self.assertEqual(p.parts[-3:], ('Programs', 'Colab-yoga', 'colab_kernel_runners.json'))
+
+    def test_macos_default_path_uses_application_support_and_creates_on_demand(self):
+        env = {k: v for k, v in os.environ.items() if k not in ('COLAB_YOGA_DIR', 'LOCALAPPDATA')}
+        with tempfile.TemporaryDirectory() as td:
+            app_sup = Path(td) / 'Library/Application Support'
+            app_sup.mkdir(parents=True)
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(ck.sys, 'platform', 'darwin'), \
+                    mock.patch.object(ck.Path, 'home', return_value=Path(td)):
+                p = ck.yoga_runners_path()
+                self.assertEqual(p, app_sup / 'Colab-yoga' / 'colab_kernel_runners.json')
+                self.assertTrue(ck._yoga_dir_created_on_demand())
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertTrue(ck.export_yoga_runners(CFG))
+                self.assertTrue(p.is_file())
+                self.assertTrue((app_sup / 'Colab-yoga' / 'local_mcp_bridge.json').is_file())
 
     def test_missing_install_dir_is_skipped_with_hint(self):
         with tempfile.TemporaryDirectory() as td:
