@@ -236,7 +236,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"   # 全部单�
 
 [Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga) 是配套的 Windows 托盘 GPU 管理台，只管 LLM 服务（llama-server :8081、Web UI、Magpie、MCP 文件桥），不含视频/生图/ComfyUI；对话流量不经过它。它管的是 GPU：花了多少 CU、当前跑哪个模型、各入口是否通，以及运行时只在被使用期间保活。唤醒时它不会杀 `:8081` 的 `llama-server` 和 MCP 转发器，只替换自己旧的 server 进程。安装目录为 `%LOCALAPPDATA%\Programs\Colab-yoga`（`Colab-yoga.exe`、`runtime\python.exe`、`bridge\colab_yoga_bridge.py`）。
 
-分工：起新实例、加新模型 → 本仓库 `colab_cli.py start`；在已导出的模型间切换、续时、查看、释放 → Colab-yoga 托盘。托盘的 agent 技能在 Colab-yoga 仓库的 `skills/colab-yoga`，需要另装；现役模型都按 G4（约 96 GB 显存）设计。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都会经 `~/.config/colab-cli/sessions.json` 复用同一台 G4。`start` 复用了别人的会话（如 Colab-yoga 的）时失败只报告、不替你停它；`yoga wake` 以 bridge 输出出现 `WAKE_URL:` 行判定成功，否则不拉起保活。心跳顺带读 VM 内 Colab-yoga 的 `/api/status`，它在下载/装载或空闲倒计时被续过，就算活动、推迟本仓库的空闲停机。
+分工：起新实例、加新模型 → 本仓库 `colab_cli.py start`；在已导出的模型间切换、续时、查看、释放 → Colab-yoga 托盘。托盘的 agent 技能在 Colab-yoga 仓库的 `skills/colab-yoga`，需要另装；现役模型都按 G4（约 96 GB 显存）设计。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都会经 `~/.config/colab-cli/sessions.json` 复用同一台 G4。`start` 复用了别人的会话（如 Colab-yoga 的）时失败只报告、不替你停它；`yoga wake` 以 bridge 输出出现 `WAKE_URL:` 行判定成功，否则不拉起保活。心跳顺带读 VM 内 Colab-yoga 的 `/health`，它在下载/装载或空闲倒计时被续过，就算活动、推迟本仓库的空闲停机。
 
 **让 Colab-yoga 认得本仓库的模型（runners，固定三步）：**
 
