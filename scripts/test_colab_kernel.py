@@ -4,7 +4,9 @@ import contextlib
 import io
 import json
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import colab_kernel as ck
@@ -195,6 +197,22 @@ class ModelProvenanceTests(unittest.TestCase):
         self.assertEqual(ck.lookup_model_provenance(spec['alias'].upper()), by_slug)
         self.assertEqual(ck.lookup_model_provenance(gguf_path='/x/' + by_slug['gguf'].rsplit('/', 1)[-1]), by_slug)
         self.assertIsNone(ck.lookup_model_provenance('no-such-model'))
+
+
+class SystemPromptTests(unittest.TestCase):
+    def test_text_is_kept_and_a_file_reference_is_read(self):
+        self.assertEqual(ck.resolve_webui_system_prompt({}), '')
+        self.assertEqual(ck.resolve_webui_system_prompt({'webui_system_prompt': ' be brief '}), 'be brief')
+        with tempfile.TemporaryDirectory() as td:
+            prompt = Path(td) / 'prompt.md'
+            prompt.write_text('line one
+line two
+', encoding='utf-8')
+            self.assertEqual(ck.resolve_webui_system_prompt({'webui_system_prompt': 'file:' + str(prompt)}),
+                             'line one
+line two')
+            with self.assertRaises(SystemExit):
+                ck.resolve_webui_system_prompt({'webui_system_prompt': 'file:' + str(Path(td) / 'missing.md')})
 
 
 if __name__ == '__main__':

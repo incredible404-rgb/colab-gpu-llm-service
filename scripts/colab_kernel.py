@@ -391,6 +391,19 @@ def lookup_model_provenance(identifier: str = '', gguf_path: str = '') -> dict |
 _GEN_ONLY_KEYS = ('notebook', 'drive_key', 'env_key', 'placeholder', 'title', 'banner', 'display')
 
 
+def resolve_webui_system_prompt(config: dict) -> str:
+    """The WebUI system prompt as text. `file:<path>` (~ expanded) reads it from that file, so a long
+    prompt can live outside .secrets.json; anything else is the prompt itself."""
+    raw = (config.get('webui_system_prompt') or '').strip()
+    if not raw.lower().startswith('file:'):
+        return raw
+    path = Path(raw[len('file:'):].strip()).expanduser()
+    try:
+        return path.read_text(encoding='utf-8').strip()
+    except OSError as err:
+        raise SystemExit(f'webui_system_prompt: cannot read {path} ({err})')
+
+
 def service_name(config: dict) -> str:
     """Tailscale Service name (the part after svc:), default 'qwen'.
 
@@ -575,7 +588,7 @@ def build_notebook_dict(spec: dict, config: dict, with_switch: bool = True) -> d
     ts_secret = config['ts_client_secret']
     mcp_ip = bridge_ip(config)
     svc_name = service_name(config)
-    system_prompt = (config.get('webui_system_prompt') or '').strip()
+    system_prompt = resolve_webui_system_prompt(config)
     alias = spec['alias']
     slug = spec['slug']
     root_dir = spec['root_dir']
