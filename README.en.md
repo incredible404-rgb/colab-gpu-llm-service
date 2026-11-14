@@ -208,6 +208,7 @@ The `<YOUR_...>` values in the example file are placeholders, not usable values;
 | `PLAYWRITER_ENTRY` | Path of Playwriter's `dist/index.js`; default is the global npm prefix |
 | `HF_TOKEN` | Optional. Hugging Face token forwarded to the runtime; the 4 active models use public weights and do not need it, only gated or rate-limited models do |
 | `COLAB_KEEPALIVE_BEAT` | `exec` makes each heartbeat start `colab exec` again (default: run in the daemon, falling back on failure) |
+| `COLAB_UPDATE_CHECK` | Set to `0` to turn the update notice off. By default `colab_cli.py` asks GitHub at most once a day for the version number of the latest release and prints one line on stderr (with the command to update) when there is a newer one; it only tells, nothing is pulled or changed |
 
 ### Command cheat sheet
 

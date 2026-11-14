@@ -208,6 +208,7 @@ python -X utf8 scripts/colab_cli.py stop --all  # 用完立即释放，核验末
 | `PLAYWRITER_ENTRY` | Playwriter 的 `dist/index.js` 路径；默认是全局 npm 前缀下的位置 |
 | `HF_TOKEN` | 可选。转发到运行时的 Hugging Face 令牌；现役 4 个模型都是公开权重，不需要，仅受限或限速的模型才用 |
 | `COLAB_KEEPALIVE_BEAT` | 设为 `exec` 时心跳改回每拍起一次 `colab exec`（默认在守护进程内执行，失败自动回退） |
+| `COLAB_UPDATE_CHECK` | 设为 `0` 关闭更新提示。默认 `colab_cli.py` 每天最多向 GitHub 询问一次最新发布的版本号，有新版本时在 stderr 提示一行（附更新命令）；只提示，不拉取、不改动任何文件 |
 
 ### 常用命令速查
 
