@@ -205,12 +205,9 @@ class SystemPromptTests(unittest.TestCase):
         self.assertEqual(ck.resolve_webui_system_prompt({'webui_system_prompt': ' be brief '}), 'be brief')
         with tempfile.TemporaryDirectory() as td:
             prompt = Path(td) / 'prompt.md'
-            prompt.write_text('line one
-line two
-', encoding='utf-8')
+            prompt.write_text('line one\nline two\n', encoding='utf-8')
             self.assertEqual(ck.resolve_webui_system_prompt({'webui_system_prompt': 'file:' + str(prompt)}),
-                             'line one
-line two')
+                             'line one\nline two')
             with self.assertRaises(SystemExit):
                 ck.resolve_webui_system_prompt({'webui_system_prompt': 'file:' + str(Path(td) / 'missing.md')})
 
