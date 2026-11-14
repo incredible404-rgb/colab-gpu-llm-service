@@ -105,7 +105,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 | `service_name` | `TS_SERVICE_NAME` | 可选，默认 `qwen`。运行时发布的 Tailscale Service 是 `svc:<service_name>`；改名时 Tailscale 里建的 Service、ACL 里的 `svc:...` 和 `tailnet_fqdn` 第一段都要同名，不一致时生成 notebook 会在下载权重前就报错 |
 | `local_tailscale_ip` | `LOCAL_TAILSCALE_IP` | 可选，仅 MCP 用。运行 `scripts/local_mcp.py`（Pi 原生工具桥）那台主机的 Tailscale IP。**不填则生成的 notebook 整个跳过本机工具桥**（不起隧道线程，WebUI 也没有 `local_mcp` 条目，`start` 也不自动拉起本机桥），其余功能不受影响 |
 | `*_drive_id`（每个现役模型一项） | 见 `scripts/secrets_config.py` | 可选。该模型 notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab`（网页后备轨道）需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
-| `webui_system_prompt` | `WEBUI_SYSTEM_PROMPT` | 可选。写进 WebUI 配置的默认系统提示；默认为空（不设系统提示）。多行文本在 JSON 里写成带 `\n` 的字符串 |
+| `webui_system_prompt` | `WEBUI_SYSTEM_PROMPT` | 可选。写进 WebUI 配置的默认系统提示；默认为空（不设系统提示）。多行文本在 JSON 里写成带 `\n` 的字符串，或写成 `file:<路径>` 从该文件读取（支持 `~`） |
 | `notebooks_dir` | `COLAB_NOTEBOOKS_DIR` | 可选。生成私有 notebook 后额外镜像到的 Drive “Colab Notebooks”文件夹；默认不镜像（见下方安全说明） |
 | `magpie_provider` | `MAGPIE_PROVIDER` | 可选。`--sync-magpie` 要同步的 Magpie provider 的 id（指向本服务 `/v1` 的那个）；未设时 `--sync-magpie` 跳过并提示 |
 | `browsermcp_bridge` | `COLAB_BROWSERMCP_BRIDGE` | 可选。BrowserMCP 桥脚本（`.mjs`）路径，后备轨道的第一档浏览器驱动；不设则直接用 Playwriter / playwright-cli |
