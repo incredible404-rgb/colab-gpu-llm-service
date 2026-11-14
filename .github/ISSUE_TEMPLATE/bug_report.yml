@@ -1,0 +1,37 @@
+name: Bug report / 问题反馈
+description: Something does not work as documented / 行为和文档不一致
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove API keys, Tailscale secrets and tailnet names from anything you paste.
+        粘贴内容前请去掉 API 密钥、Tailscale 密钥和 tailnet 名称。
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 发生了什么
+      description: The command you ran, what you expected, what you saw. 跑了什么命令、期望什么、实际看到什么。
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and GPU / 模型与 GPU
+      placeholder: "qwen3.8-flash-next on G4"
+  - type: dropdown
+    id: os
+    attributes:
+      label: Host OS / 本机系统
+      options:
+        - Windows 10/11
+        - macOS (Apple Silicon)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output / 输出
+      description: The failing command's output, secrets removed. 出错命令的输出，去掉密钥。
+      render: text
