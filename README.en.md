@@ -194,7 +194,7 @@ The first four are required by `start`; a missing one (or one that is still a `<
 | `service_name` | Optional, default `qwen`. The runtime publishes the Tailscale Service `svc:<service_name>`; when you rename it, the Service you created in Tailscale, the `svc:...` in the ACL and the first label of `tailnet_fqdn` must all match, otherwise generating the notebook fails before any weights are downloaded |
 | `local_tailscale_ip` | Optional, MCP only. Tailscale IP of the PC running `local_mcp`. Unset means no tunnel, no `local_mcp` WebUI default entry, and `start` does not launch the local bridge |
 | `*_drive_id` (one per active model) | Optional. Drive file ID of that model's notebook, needed only for `--sync-colab`; `colab_kernel.py` resolves and writes it back from the local Drive client database when generating |
-| `webui_system_prompt` | Optional. Default system prompt written into the WebUI config; empty (none) by default |
+| `webui_system_prompt` | Optional. Default system prompt written into the WebUI config; empty (none) by default. `file:<path>` reads it from that file (`~` expanded), so a long prompt need not sit in JSON |
 | `notebooks_dir` | Optional. Drive "Colab Notebooks" folder that private notebooks are additionally mirrored into; no mirroring by default |
 | `magpie_provider` | Optional. Id of the Magpie provider that `--sync-magpie` keeps in step with the active models; `--sync-magpie` is skipped with a hint when unset |
 | `browsermcp_bridge` | Optional. Path of a BrowserMCP bridge script, the first browser-driver tier of the fallback track; unset means Playwriter / playwright-cli directly |
