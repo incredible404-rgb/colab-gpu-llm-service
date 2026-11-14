@@ -46,7 +46,7 @@ FIELDS = {
     'ts_client_id': ('TS_CLIENT_ID', '<YOUR_TS_OAUTH_CLIENT_ID>'),
     'ts_client_secret': ('TS_CLIENT_SECRET', '<YOUR_TS_OAUTH_CLIENT_SECRET>'),
     'tailnet_fqdn': ('TAILNET_FQDN', 'qwen.<YOUR_TAILNET>.ts.net'),
-    # Tailscale IP of the Windows machine running local_novel_mcp.py (the WebUI file bridge dials it).
+    # Tailscale IP of the machine running local_mcp.py (the runtime's MCP forwarder dials it).
     'local_tailscale_ip': ('LOCAL_TAILSCALE_IP', '<YOUR_LOCAL_TAILSCALE_IP>'),
     'g4huihui_drive_id': ('G4HUIHUI_DRIVE_ID', '<YOUR_G4HUIHUI_NOTEBOOK_DRIVE_ID>'),
     'gemma31b_drive_id': ('GEMMA31B_DRIVE_ID', '<YOUR_GEMMA31B_NOTEBOOK_DRIVE_ID>'),
@@ -60,6 +60,8 @@ FIELDS = {
     'webui_system_prompt': ('WEBUI_SYSTEM_PROMPT', ''),
     # Local "Colab Notebooks" folder generated notebooks are mirrored to; empty = never mirror.
     'notebooks_dir': ('COLAB_NOTEBOOKS_DIR', ''),
+    # Id of the Magpie provider --sync-magpie keeps in step with MODELS; empty = --sync-magpie is skipped.
+    'magpie_provider': ('MAGPIE_PROVIDER', ''),
 }
 
 

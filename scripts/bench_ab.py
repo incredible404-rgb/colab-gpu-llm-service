@@ -47,7 +47,7 @@ DECODE_PROMPTS = [
     '写一个 SQL：每个部门薪资排名前三的员工。',
     '用 TypeScript 实现一个简单的发布订阅事件总线。',
     '说明 Transformer 里 KV cache 为什么能加速解码。',
-    '续写小说开头：深夜，灯塔的灯忽然灭了。',
+    '续写这个开头：深夜，灯塔的灯忽然灭了。',
     '求解 x^3 - 6x^2 + 11x - 6 = 0 并写出步骤。',
     'Explain the difference between a mutex and a semaphore with a short example.',
     '写一份 Linux 排查磁盘占满的步骤清单。',

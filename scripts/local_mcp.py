@@ -10,7 +10,7 @@ Written for cloud models that reach this PC through the Colab WebUI's --ui-mcp-p
 the bearer token in the client's private MCP settings; notebooks and public defaults never contain it.
 LOCAL_MCP_CONFIG and LOCAL_MCP_PORT
 redirect the files and the port so a test never touches the real bridge (default port 3426, default cwd
-from $NOVEL_ROOT / novel_root in .secrets.json).
+from $LOCAL_MCP_CWD, else ~/Documents).
 """
 from __future__ import annotations
 
@@ -82,24 +82,15 @@ def url() -> str:
 
 
 def default_cwd() -> str:
-    """Initial cwd: explicit LOCAL_MCP_CWD, compatible novel_root, then ~/Documents/Colab创作, ~/Documents, ~.
+    """Initial cwd: $LOCAL_MCP_CWD, then ~/Documents, then ~.
 
     This is a default location; tools also accept absolute paths with the current user's full rights.
     """
-    configured = (os.environ.get('LOCAL_MCP_CWD') or os.environ.get('NOVEL_ROOT') or '').strip()
-    if not configured:
-        try:
-            sys.path.insert(0, str(Path(__file__).resolve().parent))
-            from secrets_config import optional_setting
-            configured = optional_setting('novel_root', 'NOVEL_ROOT')
-        except Exception:
-            configured = ''
+    configured = (os.environ.get('LOCAL_MCP_CWD') or '').strip()
     if configured:
         return str(Path(configured).expanduser().resolve())
-    for path in (Path.home() / 'Documents' / 'Colab\u521b\u4f5c', Path.home() / 'Documents', Path.home()):
-        if path.is_dir():
-            return str(path.resolve())
-    return str(Path.home())
+    documents = Path.home() / 'Documents'
+    return str((documents if documents.is_dir() else Path.home()).resolve())
 
 
 def tailscale_bind_ip() -> str:
@@ -227,11 +218,9 @@ def probe(token: str = '', timeout: float = 2.0) -> dict | None:
 
 
 def _holder(health: dict) -> str:
-    """What answers on the port: ours, the legacy novel bridge, or something unknown."""
+    """What answers on the port: ours, or something else."""
     if health.get('server') == 'local_mcp':
         return 'local_mcp'
-    if 'root' in health:
-        return 'local_novel_mcp (legacy novel bridge)'
     return 'another program'
 
 

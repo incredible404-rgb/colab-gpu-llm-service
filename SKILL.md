@@ -9,7 +9,7 @@ description: 在 Google Colab 付费 GPU（默认 G4 RTX PRO 6000 96GB）上部�
 
 **给 agent 的硬规则**
 
-1. 开机会烧付费 CU，起 GPU 前先向用户确认，确认话术必须带四样：当日费率、预计时长、粗算费用、当前余额。G4 实测约 **10 CU/h**（`debug-runs/` 里 2026-11-07 两次开机均为 `rate 10.05 CU/h`）：没有活动实例时 `status` 的费率是 0，开机前读不到当日值，所以开机前的确认话术按约 10 CU/h 报并注明是实测参考；开机后读 `start OK` 行里的 `rate` 再向本人更正，以 Colab 页面为准。预计时长 = 冷启动（实测 2～2.5 分钟，大权重或慢网下载会更久，按 2～15 分钟报）+ 计划使用时长；例：用 2 小时约 20～25 CU。没人用就停，保活进程 45 分钟无推理流量也会自动 `colab stop`。任务结束必须 `stop --all` 并核验 `0 active`。
+1. 开机会烧付费 CU，起 GPU 前先向用户确认，确认话术必须带四样：当日费率、预计时长、粗算费用、当前余额。G4 实测约 **10 CU/h**（2026-11-07 两次开机均为 `rate 10.05 CU/h`）：没有活动实例时 `status` 的费率是 0，开机前读不到当日值，所以开机前的确认话术按约 10 CU/h 报并注明是实测参考；开机后读 `start OK` 行里的 `rate` 再向本人更正，以 Colab 页面为准。预计时长 = 冷启动（实测 2～2.5 分钟，大权重或慢网下载会更久，按 2～15 分钟报）+ 计划使用时长；例：用 2 小时约 20～25 CU。没人用就停，保活进程 45 分钟无推理流量也会自动 `colab stop`。任务结束必须 `stop --all` 并核验 `0 active`。
 2. `.secrets.json` 与不带 `--sanitized` 生成的 notebooks 含真实密钥，不回显、不提交、不外传。私有构建默认写进被 `.gitignore` 忽略的 `notebooks/private/`，不会覆盖仓库里已提交的脱敏版（技能目录是 `git clone`，覆盖了会挡住以后的 `git pull`）；脱敏构建（`--sanitized`）才写 `notebooks/`。每次生成完仍跑 `git status`，含密钥的文件不要 `git add`。
 3. 状态以命令实时输出为准（`status`、`colab_kernel.py --list`），不要凭本文档回答余额、费率或模型清单。
 4. 第一次 Google OAuth 授权必须由本人完成（见第 0 节）。脚本里的每次 `colab` 调用都关闭了 stdin，未授权时一行报错 `colab CLI is not authorized ... (SKILL.md section 0 ...)` 并带授权链接，不会卡 3 分钟；看到它就停下，把链接交给本人，不要自己等输入，也不要在 agent 终端里直接跑 `colab sessions`（它会卡在 `input()`）。
@@ -98,7 +98,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 
 | 字段 | 环境变量 | 含义 |
 |---|---|---|
-| `api_key` | `LLAMA_API_KEY` | 必填。你自定义的任意长随机串。它被写进运行时的 `<root_dir>/.llama-api-key`，生成的 notebook 内部调用和本仓库脚本（`remote_check`、`bench_ab.py`）访问 `/v1` 时都会带 `Authorization: Bearer <api_key>`。**llama-server 启动时没有 `--api-key` / `--api-key-file`，不校验它**：tailnet 内任何能连上 `<service>.<tailnet>.ts.net:443` 的设备都能免密调用 `/v1`、打开 WebUI；配了文件桥时，还能经 `--ui-mcp-proxy` 暴露的 MCP 代理读、写、移动、删除本机 `novel_root` 目录里的文件。这是有意的（WebUI、Magpie 免密即开即用），所以 **tailnet 就是唯一的门，`api_key` 目前不构成访问控制**。把 tailnet 共享给别人（共享设备、邀请成员、开 Funnel/Tunnel）之前，先在 ACL 里只放行自己的设备，或者改代码给 llama-server 加回 `--api-key-file`（做法见 [`references/secure-remote-service.md`](references/secure-remote-service.md)），并停掉文件桥 |
+| `api_key` | `LLAMA_API_KEY` | 必填。你自定义的任意长随机串。它被写进运行时的 `<root_dir>/.llama-api-key`，生成的 notebook 内部调用和本仓库脚本（`remote_check`、`bench_ab.py`）访问 `/v1` 时都会带 `Authorization: Bearer <api_key>`。**llama-server 启动时没有 `--api-key` / `--api-key-file`，不校验它**：tailnet 内任何能连上 `<service>.<tailnet>.ts.net:443` 的设备都能免密调用 `/v1`、打开 WebUI；配了文件桥时，还能经 `--ui-mcp-proxy` 暴露的 MCP 代理读、写、移动、删除本机文件。这是有意的（WebUI、Magpie 免密即开即用），所以 **tailnet 就是唯一的门，`api_key` 目前不构成访问控制**。把 tailnet 共享给别人（共享设备、邀请成员、开 Funnel/Tunnel）之前，先在 ACL 里只放行自己的设备，或者改代码给 llama-server 加回 `--api-key-file`（做法见 [`references/secure-remote-service.md`](references/secure-remote-service.md)），并停掉文件桥 |
 | `ts_client_id` | `TS_CLIENT_ID` | 必填。Tailscale OAuth 客户端 ID（权限仅 Auth Keys: Write，标签 `tag:colab`） |
 | `ts_client_secret` | `TS_CLIENT_SECRET` | 必填。上述 OAuth 客户端的 secret，运行时用它现签一次性、临时的节点认证密钥 |
 | `tailnet_fqdn` | `TAILNET_FQDN` | 必填。服务域名，形如 `qwen.<你的tailnet>.ts.net`；第一段就是你在 Tailscale 里建的 Service 名（默认 `qwen`，要换名见下面的 `service_name`） |
@@ -107,8 +107,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 | `*_drive_id`（每个现役模型一项） | 见 `scripts/secrets_config.py` | 可选。该模型 notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab`（网页后备轨道）需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
 | `webui_system_prompt` | `WEBUI_SYSTEM_PROMPT` | 可选。写进 WebUI 配置的默认系统提示；默认为空（不设系统提示）。多行文本在 JSON 里写成带 `\n` 的字符串 |
 | `notebooks_dir` | `COLAB_NOTEBOOKS_DIR` | 可选。生成私有 notebook 后额外镜像到的 Drive “Colab Notebooks”文件夹；默认不镜像（见下方安全说明） |
-| `novel_root` | `NOVEL_ROOT` | 可选。`local_mcp.py` 首次启动时的默认工作目录（已有 `~/.config/colab-cli/local-mcp.json` 的 `cwd` 优先）；未设时 `~/Documents/Colab创作` 存在则用，否则 `~/Documents`；支持 `~`。不是沙箱。独立的 `local_novel_mcp.py` 小说工具也读它（其默认是 `~/Documents/colab-novel`） |
-| `novel_skill_map` | `NOVEL_SKILL_MAP` | 可选。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件；默认为空（不暴露任何目录外文件）。写成一个字符串，条目形如 `名字=文件路径`，用 `;` 或换行分隔，路径支持 `~`，例如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；改后要重启 `local_novel_mcp.py` |
+| `magpie_provider` | `MAGPIE_PROVIDER` | 可选。`--sync-magpie` 要同步的 Magpie provider 的 id（指向本服务 `/v1` 的那个）；未设时 `--sync-magpie` 跳过并提示 |
 | `browsermcp_bridge` | `COLAB_BROWSERMCP_BRIDGE` | 可选。BrowserMCP 桥脚本（`.mjs`）路径，后备轨道的第一档浏览器驱动；不设则直接用 Playwriter / playwright-cli |
 
 示例文件里的 `<YOUR_...>` 都是占位符，不是可用值（直接复制不改，等于没填）；可选的后几项（`service_name` 及之后）不在示例文件里，需要时手动加键，可选项写成 `""` 等同于没填。其余可调环境变量：

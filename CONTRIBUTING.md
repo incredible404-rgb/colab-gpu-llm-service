@@ -10,6 +10,10 @@ Issues and pull requests are welcome. This is a small project with one maintaine
 
 Open an issue first and say what you want to change. A new model, a new host platform or a change to the runners format that Colab-yoga reads is easier to agree on before the code exists.
 
+### What belongs here
+
+This repository is the general tool: deploying and running GGUF models on a paid Colab GPU. One person's use case stays out of it: personal prompts and presets, tools built for one kind of work, folders and account ids of one machine, debug logs. Keep those in your own private overlay and connect them through the settings in `.secrets.json` or environment variables (`webui_system_prompt`, `LOCAL_MCP_CWD`, `magpie_provider`, ...). Colab-yoga is a separate, optional project: the only link is the runners file this repository exports. `scripts/test_generic_repo.py` fails when a known personal marker comes back.
+
 ### Set up and test
 
 Python 3.10+ and `pip install requests`; everything else is standard library.
@@ -50,6 +54,10 @@ Contributions are licensed under the license in [LICENSE](LICENSE).
 ### 改动较大时
 
 先开 issue 说明想改什么。新增模型、新增本机平台、改 Colab-yoga 读取的 runners 格式，这类事在写代码之前对齐更省事。
+
+### 什么该进这个仓库
+
+本仓库是通用工具：在付费 Colab GPU 上部署和运行 GGUF 模型。某一个人的用法不进来：个人提示词和预设、为某一类工作特制的工具、某台机器的目录和账号 id、调试日志。这些放在你自己的私有目录或仓库里，通过 `.secrets.json` 或环境变量里的设置项接入（`webui_system_prompt`、`LOCAL_MCP_CWD`、`magpie_provider` 等）。Colab-yoga 是独立的可选项目，两边唯一的衔接是本仓库导出的 runners 文件。已知的个人化标记再出现时，`scripts/test_generic_repo.py` 会失败。
 
 ### 环境与测试
 

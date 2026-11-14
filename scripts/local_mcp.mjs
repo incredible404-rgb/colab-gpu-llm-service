@@ -9,8 +9,8 @@
  *
  * Every POST /mcp needs `Authorization: Bearer <token>`; the token and the default working directory are
  * read from the JSON file local_mcp.py writes (LOCAL_MCP_CONFIG redirects it for isolated tests). GET
- * /health is unauthenticated and only names the server, so a launcher can tell this bridge apart from the
- * legacy local_novel_mcp.py on the same port without leaking a token, a pid or a path.
+ * /health is unauthenticated and only names the server, so a launcher can tell this bridge apart from
+ * another program on the same port without leaking a token, a pid or a path.
  *
  * Usage: node local_mcp.mjs [--print-tools]   (normal operation is through `local_mcp.py start`)
  */

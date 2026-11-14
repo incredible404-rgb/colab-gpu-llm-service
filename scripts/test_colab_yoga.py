@@ -117,6 +117,17 @@ class RunnersExportTests(unittest.TestCase):
         self.assertIn('skipped', out)
         self.assertIn('github.com/incredible404-rgb/Colab-yoga', out)
 
+    def test_runners_carry_the_display_name_tags_and_note(self):
+        with tempfile.TemporaryDirectory() as td:
+            dst = Path(td) / 'colab_kernel_runners.json'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(ck.export_yoga_runners(CFG, dst))
+            runners = json.loads(dst.read_text(encoding='utf-8'))
+        for slug, spec in ck.MODELS.items():
+            for key in ('name', 'tags', 'note'):
+                self.assertEqual(runners[slug][key], spec['display'][key])
+            self.assertNotIn('display', runners[slug])
+
     def test_writes_runners_for_every_active_model(self):
         with tempfile.TemporaryDirectory() as td:
             dst = Path(td) / 'colab_kernel_runners.json'

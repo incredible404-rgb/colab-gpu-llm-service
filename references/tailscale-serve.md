@@ -78,7 +78,7 @@ tailscale serve --bg --https=443 http://127.0.0.1:8081                     # 节
   `autoApprovers` 自动放行；**域名在审批生效后几秒到十几秒内可用**，
   切换瞬间的一次请求可能超时，重试即可。
 - 若配置了 `local_tailscale_ip`，内核另起一个线程把运行时 `127.0.0.1:3426` 经 `--socks5-server=localhost:1055`
-  反连到你本机的 `local_novel_mcp.py`；没配则不起这个线程。
+  反连到你本机的 `local_mcp.py`；没配则不起这个线程。
 
 ## 两个必踩的坑
 
@@ -109,7 +109,7 @@ Invoke-RestMethod -Uri 'http://qwen.<tailnet>.ts.net:443/v1/models' -Headers @{A
 ```
 
 模型起来后同一地址就是 OpenAI 兼容接口：`http://qwen.<tailnet>.ts.net:443/v1`。
-各模型笔记本不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。也就是说 `.secrets.json` 的 `api_key` 在服务端不校验：tailnet 内任何设备都能免密调用 `/v1`，配了文件桥时还能经 `--ui-mcp-proxy` 的 MCP 代理读写本机 `novel_root`。把 tailnet 共享给别人之前先收紧 ACL（只放行自己的设备）或加回 `--api-key-file`。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
+各模型笔记本不再给 `llama-server` 传 `--api-key-file`：`svc:qwen` 只在 tailnet 内可见（未开 Funnel），网页端无需粘贴 key，只剩 tailnet 身份这一层。也就是说 `.secrets.json` 的 `api_key` 在服务端不校验：tailnet 内任何设备都能免密调用 `/v1`，配了文件桥时还能经 `--ui-mcp-proxy` 的 MCP 代理读写本机文件。把 tailnet 共享给别人之前先收紧 ACL（只放行自己的设备）或加回 `--api-key-file`。任何要上 Funnel、Quick Tunnel 或其他公网入口的场景必须重新加回 `--api-key-file`。
 
 实测（2026-10-20）：新节点自带标签、服务主机自动 Online，
 Web 200、`/v1/models` 1.3 s、chat 1.66 s。
