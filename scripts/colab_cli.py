@@ -1142,4 +1142,9 @@ def main(argv: list[str]):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1:]) or 0)
+    try:
+        code = main(sys.argv[1:]) or 0
+    finally:  # also after a command that ended with SystemExit
+        import update_notice
+        update_notice.show()
+    sys.exit(code)
