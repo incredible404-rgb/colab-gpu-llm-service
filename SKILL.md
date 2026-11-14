@@ -119,6 +119,7 @@ python -X utf8 scripts/colab_cli.py stop --all      # 核验末行 Active assign
 | `PLAYWRITER_ENTRY` | Playwriter 的 `dist/index.js` 路径；默认是全局 npm 前缀下的位置 |
 | `HF_TOKEN` | 转发到运行时的 Hugging Face 令牌 |
 | `COLAB_KEEPALIVE_BEAT` | 设为 `exec` 时心跳改回每拍起一次 `colab exec`（默认在守护进程内执行，失败自动回退） |
+| `COLAB_UPDATE_CHECK` | 设为 `0` 关闭更新提示。默认 `colab_cli.py` 每天最多询问一次 GitHub 的最新发布版本，有新版本时在 stderr 提示一行并附更新命令；只提示，不拉取。看到提示时转告用户，由用户决定是否更新 |
 | `UV_TOOL_BIN_DIR` / `XDG_BIN_HOME` | uv 的工具可执行目录；脚本在 PATH 里找不到 `colab` 时也会查这里和 `~/.local/bin` |
 
 **含密钥的产物不要外传。** 不带 `--sanitized` 生成的 notebook 内嵌 `api_key` 与 Tailscale OAuth secret，默认写进被 `.gitignore` 忽略的 `notebooks/private/`（`notebooks/` 里已提交的是脱敏版，不会被它覆盖）。把它镜像进 Google Drive 是显式选择：设了 `notebooks_dir` / `COLAB_NOTEBOOKS_DIR`，或命令行带 `--mirror-drive`（探测本机 My Drive）才会复制，且只在输出目录是默认位置时发生。每次私有构建跑完仍执行 `git status`；要发布时用 `--sanitized` 生成脱敏副本（默认就写 `notebooks/`）。早期版本把私有构建写在 `notebooks/` 里的话，`launch` 在 `notebooks/private/` 没有时仍会读它，下一次生成就会落到 `notebooks/private/`。
