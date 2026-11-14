@@ -473,7 +473,7 @@ class CliStopOrderingTests(unittest.TestCase):
              mock.patch.object(colab_cli, 'stop_keepalive', side_effect=fake_stop_keepalive), \
              mock.patch.object(colab_cli, 'colab', side_effect=fake_colab), \
              mock.patch.object(colab_cli, 'usage', return_value={'balance': 5.0, 'rate': 0.0, 'active': 0}), \
-             mock.patch.object(colab_cli, 'stop_novel_mcp') as stop_mcp, \
+             mock.patch.object(colab_cli, 'stop_local_mcp') as stop_mcp, \
              contextlib.redirect_stdout(out):
             rc = colab_cli.cmd_stop(names)
             stop_mcp.assert_called_once_with(account_idle=True)
@@ -525,8 +525,8 @@ class LaunchDetachTests(unittest.TestCase):
             with mock.patch.object(colab_cli.os, 'name', 'posix'), \
                  mock.patch.object(colab_cli, 'CLI_DIR', cli_dir), \
                  mock.patch.object(colab_cli, 'CLI_PYTHONW', py3), \
-                 mock.patch.object(colab_cli, 'start_novel_mcp'), \
-                 mock.patch.object(colab_cli, 'stop_novel_mcp'), \
+                 mock.patch.object(colab_cli, 'start_local_mcp'), \
+                 mock.patch.object(colab_cli, 'stop_local_mcp'), \
                  mock.patch.object(colab_cli.subprocess, 'Popen', side_effect=lambda *a, **kw: spawned.append((a, kw))), \
                  mock.patch.object(colab_cli, '_wait_keepalive', return_value={'pid': 5555}), \
                  contextlib.redirect_stdout(io.StringIO()):
@@ -539,7 +539,7 @@ class LaunchDetachTests(unittest.TestCase):
             alive = [True, False]
             with mock.patch.object(colab_cli.os, 'name', 'posix'), \
                  mock.patch.object(colab_cli, 'CLI_DIR', cli_dir), \
-                 mock.patch.object(colab_cli, 'stop_novel_mcp'), \
+                 mock.patch.object(colab_cli, 'stop_local_mcp'), \
                  mock.patch.object(colab_cli, '_pid_alive', side_effect=lambda _: alive.pop(0) if alive else False), \
                  mock.patch.object(colab_cli.os, 'kill', side_effect=lambda pid, sig: killed.append((pid, sig))), \
                  mock.patch.object(colab_cli.subprocess, 'run', side_effect=AssertionError('taskkill/schtasks must not run')):

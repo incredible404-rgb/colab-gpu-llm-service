@@ -330,7 +330,7 @@ class MagpieLauncherTests(unittest.TestCase):
         with mock.patch.object(ck, '_magpie_launcher', return_value=None), \
                 mock.patch.object(ck.subprocess, 'run', side_effect=AssertionError('no process may start')), \
                 contextlib.redirect_stdout(out):
-            ck.sync_magpie_models()
+            ck.sync_magpie_models('gw')
         self.assertIn('skipped', out.getvalue())
 
     def test_launcher_prefers_a_real_executable_on_path(self):
@@ -369,18 +369,6 @@ class YogaRunnersHintTests(unittest.TestCase):
                 ck.export_yoga_runners(CFG)
             self.assertTrue((Path(td) / 'colab_kernel_runners.json').exists())
         self.assertIn('Exported Colab-yoga runners to:', out.getvalue())
-
-
-class NovelRootTests(unittest.TestCase):
-    def test_root_resolution_order(self):
-        import local_novel_mcp as m
-        with mock.patch.dict(os.environ, {'NOVEL_ROOT': str(Path.home() / 'envroot')}):
-            self.assertEqual(m._novel_root(), (Path.home() / 'envroot').resolve())
-        env = {k: v for k, v in os.environ.items() if k != 'NOVEL_ROOT'}
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m, 'optional_setting', return_value='~/from-secrets'):
-            self.assertEqual(m._novel_root(), (Path.home() / 'from-secrets').resolve())
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m, 'optional_setting', return_value=''):
-            self.assertEqual(m._novel_root(), (Path.home() / 'Documents/colab-novel').resolve())
 
 
 class SyncTierTests(unittest.TestCase):

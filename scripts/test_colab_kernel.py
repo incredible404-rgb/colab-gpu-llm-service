@@ -1,5 +1,7 @@
 """Generation tests for the 3.8fn-only kernel (no network, no Drive writes)."""
 import ast
+import contextlib
+import io
 import json
 import subprocess
 import unittest
@@ -150,9 +152,15 @@ class NotebookTests(unittest.TestCase):
 
 
 class MagpieSyncTests(unittest.TestCase):
+    def test_sync_without_a_provider_is_skipped_before_any_magpie_call(self):
+        out = io.StringIO()
+        with mock.patch.object(ck, '_magpie_launcher', return_value=('magpie',)),                 mock.patch.object(ck.subprocess, 'run', side_effect=AssertionError('magpie must not run')),                 contextlib.redirect_stdout(out):
+            ck.sync_magpie_models('')
+        self.assertIn('magpie_provider is not set', out.getvalue())
+
     def test_sync_keeps_models_outside_registry_and_prunes_archived(self):
-        listed = '  qwen-colab/Old-Model  low/medium\n  qwen-colab/Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS  low\n  other/x\n'
-        specs = '  qwen-colab/*  context 262144\n  qwen-colab/Custom-External  context 262144\n'
+        listed = '  gw/Old-Model  low/medium\n  gw/Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS  low\n  other/x\n'
+        specs = '  gw/*  context 262144\n  gw/Custom-External  context 262144\n'
         calls = []
 
         def fake_run(argv, **kw):
@@ -167,8 +175,8 @@ class MagpieSyncTests(unittest.TestCase):
 
         with mock.patch.object(ck, '_magpie_launcher', return_value=('bash', '-lc')), \
                 mock.patch.object(ck.subprocess, 'run', side_effect=fake_run):
-            ck.sync_magpie_models()
-        replace = next(c for c in calls if 'provider models qwen-colab' in c).split()
+            ck.sync_magpie_models('gw')
+        replace = next(c for c in calls if 'provider models gw' in c).split()
         self.assertIn('Old-Model', replace)
         self.assertIn('Custom-External', replace)
         self.assertNotIn('Swift-1.5-Qwen3.8-Flash-Next-IQ4_XS', replace)
@@ -176,6 +184,17 @@ class MagpieSyncTests(unittest.TestCase):
         for spec in ck.MODELS.values():
             self.assertIn(spec['alias'], replace)
         self.assertEqual(len(replace), len(set(replace)))
+
+
+class ModelProvenanceTests(unittest.TestCase):
+    def test_lookup_by_slug_alias_and_gguf_name(self):
+        slug, spec = next(iter(ck.MODELS.items()))
+        by_slug = ck.lookup_model_provenance(slug)
+        self.assertEqual(by_slug['alias'], spec['alias'])
+        self.assertTrue(by_slug['repo'] and by_slug['rev'] and by_slug['hf_url'].endswith(by_slug['repo']))
+        self.assertEqual(ck.lookup_model_provenance(spec['alias'].upper()), by_slug)
+        self.assertEqual(ck.lookup_model_provenance(gguf_path='/x/' + by_slug['gguf'].rsplit('/', 1)[-1]), by_slug)
+        self.assertIsNone(ck.lookup_model_provenance('no-such-model'))
 
 
 if __name__ == '__main__':

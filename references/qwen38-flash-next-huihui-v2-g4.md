@@ -1,13 +1,13 @@
 # Huihui-Qwen3.8-Flash-Next-abliterated-v2 UD-Q4_K_XL-V2 on Colab G4
 
-基于 [`huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF) 的最新 `unsloth-UD-Q4_K_XL-V2`（作者用 `calibration3.txt` / `imatrix_micro3.gguf` 重校，并在 v2 中不消融路由专家层，专为小说与编程调整）。采样、4 档中文思考补丁、MTP 投机解码、262k 上下文与 WebUI 本机小说目录桥全部由 `colab_kernel.py` 统一生成，可与 `qwen38-fn` / `qwen38-fn-nl` 免释放热切换。
+基于 [`huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF`](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF) 的最新 `unsloth-UD-Q4_K_XL-V2`（作者用 `calibration3.txt` / `imatrix_micro3.gguf` 重校，并在 v2 中不消融路由专家层，专为写作与编程调整）。采样、4 档中文思考补丁、MTP 投机解码、262k 上下文与 WebUI 本机文件桥全部由 `colab_kernel.py` 统一生成，可与 `qwen38-fn` / `qwen38-fn-nl` 免释放热切换。
 
 | 项目 | 值 |
 |---|---|
 | slug / 生成脚本 | `qwen38-huihui-v2` / [`scripts/make_g4_huihui_v2_notebook.py`](../scripts/make_g4_huihui_v2_notebook.py) |
 | 笔记本 | [`notebooks/qwen3.8-flash-next-huihui-v2-g4-colab.ipynb`](../notebooks/qwen3.8-flash-next-huihui-v2-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `g4huihui_drive_id`） |
 | CLI 启动 | `python -X utf8 scripts/colab_cli.py start qwen38-huihui-v2`（或 `launch`） |
-| Magpie 模型 ID | `qwen-colab/Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL` |
+| Magpie 模型 ID | `<magpie_provider>/Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL` |
 | 主权重 | `huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF` @ `cbc7fba13f1939ac3fa42b18d77ccf43847d74ef`，`unsloth-UD-Q4_K_XL-V2/Qwen3.8-Flash-Next-UD-Q4_K_XL-0000{1..4}-of-00004.gguf`，共 111.33 GB（103.69 GiB） |
 | 视觉头 | 同仓 `mmproj-Qwen3.8-Flash-Next-BF16.gguf`（`907_543_008` B，sha256 `b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0`） |
 | MTP 草稿头 | `unsloth/Qwen3.8-Flash-Next-GGUF` `MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf`（`2_786_204_800` B，与 `qwen38-fn` 共用） |
@@ -29,7 +29,7 @@
 | 主机内存（已释放显存专用分片副本后） | `total 176 GiB, used 65 GiB, available 111 GiB`（第 2 片常驻 `/dev/shm`，第 1/4 片、mmproj、MTP 内存盘副本已删） |
 | 冷启动耗时（CLI，含下载） | **233.5 s**（并发下载 107.13 GiB 用 212.8 s，均速 515 MB/s；内存盘 61.1 GiB、本地盘 46.0 GiB） |
 | `/props` 门禁 | `reasoning_effort_levels: ['low', 'medium', 'high', 'xhigh']`，`n_ctx: 262144` |
-| 长篇小说开篇试写（3,159 prompt tokens → 2,996 output tokens，`high` 思考档） | 预填 **3,446.1 tok/s**（0.92 s）｜解码 **104.4 tok/s**（28.67 s）｜MTP 草稿接受 **1,635 / 2,909（56.2%）** |
+| 长文生成试写（3,159 prompt tokens → 2,996 output tokens，`high` 思考档） | 预填 **3,446.1 tok/s**（0.92 s）｜解码 **104.4 tok/s**（28.67 s）｜MTP 草稿接受 **1,635 / 2,909（56.2%）** |
 
 ## 分片大小与 SHA-256
 

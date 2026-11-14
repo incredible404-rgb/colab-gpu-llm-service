@@ -75,7 +75,7 @@ flowchart LR
 
 ## 主力轨道：官方 Colab CLI 无头启动 + 30 秒内核心跳
 
-自 CLI 0.7.5 起，由 CLI 创建的运行时（无论是 T4 还是 G4）若内核没有收到新的代码执行请求，会在创建后 21–35 分钟内被强制回收；单纯的 TFE ping、单个长跑单元格或正在进行的模型推理都不算数，且旧版 `RuntimeService/KeepAliveAssignment` RPC 会返回 `403 USER_PROJECT_DENIED`。每隔 30 秒执行一行轻量 `colab exec` 即可让 VM 持续存活（与 Wakeloom 本地模式同理）。`colab_keepalive.py` 在守护进程内按同样方式执行（每拍新连一次内核 websocket、执行、断开），不再每 30 秒起一个 CLI 进程；进程内失败会立即改用 `colab exec` 补上这一拍，设 `COLAB_KEEPALIVE_BEAT=exec` 可整体回退。2026-11-10 在 CPU 运行时上实测进程内心跳：连续 37 分钟、75 拍、0 失败，运行时未被回收；守护进程平均每拍约 76 ms CPU（旧方式每拍起 CLI 约 1.1 s）。2026-11-07 实测（见 `debug-runs/2026-11-07-*kernel-beat*`）：T4 对照组在 21.0 分钟被回收，而心跳组完整存活满 42 分钟；运行 `qwen38-fn` 的 G4 实例在 77 次心跳间持续对外服务满 39 分钟（仅在 Cell 1 启动期间出现 1 次预期的队列超时，启动完成后 0 失败），直至闲置守卫干净地将其关停。
+自 CLI 0.7.5 起，由 CLI 创建的运行时（无论是 T4 还是 G4）若内核没有收到新的代码执行请求，会在创建后 21–35 分钟内被强制回收；单纯的 TFE ping、单个长跑单元格或正在进行的模型推理都不算数，且旧版 `RuntimeService/KeepAliveAssignment` RPC 会返回 `403 USER_PROJECT_DENIED`。每隔 30 秒执行一行轻量 `colab exec` 即可让 VM 持续存活（与 Wakeloom 本地模式同理）。`colab_keepalive.py` 在守护进程内按同样方式执行（每拍新连一次内核 websocket、执行、断开），不再每 30 秒起一个 CLI 进程；进程内失败会立即改用 `colab exec` 补上这一拍，设 `COLAB_KEEPALIVE_BEAT=exec` 可整体回退。2026-11-10 在 CPU 运行时上实测进程内心跳：连续 37 分钟、75 拍、0 失败，运行时未被回收；守护进程平均每拍约 76 ms CPU（旧方式每拍起 CLI 约 1.1 s）。2026-11-07 实测：T4 对照组在 21.0 分钟被回收，而心跳组完整存活满 42 分钟；运行 `qwen38-fn` 的 G4 实例在 77 次心跳间持续对外服务满 39 分钟（仅在 Cell 1 启动期间出现 1 次预期的队列超时，启动完成后 0 失败），直至闲置守卫干净地将其关停。
 
 `scripts/colab_cli.py` 封装并驱动官方 [`google-colab-cli`](https://github.com/googlecolab/google-colab-cli)（通过 `uv tool install "google-colab-cli==0.7.5"` 安装；首次 OAuth 授权必须由本人在自己的终端完成，见下方“前置条件”）。它执行由 `colab_kernel.py` 生成的完全相同的 Cell 1 代码（`colab_kernel.py --list` 列出的任一现役或归档模型），仅剥离了纯前端尾部（横幅、WebUI 弹窗、停止按钮），全程无需打开浏览器标签页。
 
@@ -149,7 +149,7 @@ python -X utf8 scripts/colab_sync.py --release-all          # 强杀全部活动
 | 可选：Colab-yoga | Windows 托盘 / macOS 菜单栏 GPU 管理台（[Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)，只管 LLM 服务，不含视频/生图/ComfyUI），装到 `%LOCALAPPDATA%\Programs\Colab-yoga`（macOS：`~/Library/Application Support/Programs/Colab-yoga`）或免安装版解压到任意目录后，与本仓库共用同一台 G4（runners 自动写入 `%LOCALAPPDATA%\Colab-yoga` 或 `~/Library/Application Support/Colab-yoga`，零配置衔接）；不装不影响任何核心命令 |
 | 可选：后备轨道 | Node.js，以及已登录 Google 账号的 Edge，加一个浏览器驱动：Playwriter（`npm install -g playwriter` + 其 Edge 扩展）或 `@playwright/cli`（`npm install -g @playwright/cli`），或自备 BrowserMCP 桥（`COLAB_BROWSERMCP_BRIDGE`） |
 
-**费用：** G4 实测约 **10 CU/小时**（`debug-runs/` 里 2026-11-07 两次开机均为 `rate 10.05 CU/h`；以 Colab 页面和 `colab_cli.py status` 的当日值为准）。冷启动实测 2～2.5 分钟，大权重更久，这段同样计费；用 2 小时约 20～25 CU。保活进程 45 分钟无推理流量自动停机。
+**费用：** G4 实测约 **10 CU/小时**（2026-11-07 两次开机均为 `rate 10.05 CU/h`；以 Colab 页面和 `colab_cli.py status` 的当日值为准）。冷启动实测 2～2.5 分钟，大权重更久，这段同样计费；用 2 小时约 20～25 CU。保活进程 45 分钟无推理流量自动停机。
 
 ### 安装为 agent 技能
 
@@ -196,11 +196,10 @@ python -X utf8 scripts/colab_cli.py stop --all  # 用完立即释放，核验末
 | `*_drive_id`（每个现役模型一项） | 可选。该模型 Notebook 在你 Google Drive 里的文件 ID，仅 `--sync-colab` 需要；`colab_kernel.py` 生成时会从本机 Drive 客户端数据库自动解析并回填 |
 | `webui_system_prompt` | 可选。写进 WebUI 配置的默认系统提示，默认为空（不设） |
 | `notebooks_dir` | 可选。生成私有 Notebook 后额外镜像到的 Drive “Colab Notebooks”目录，默认不镜像 |
-| `novel_root` | 兼容配置，作为 `local_mcp` 首次启动的默认工作目录；已有 `local-mcp.json` 的 `cwd` 优先。此目录不是沙箱 |
-| `novel_skill_map` | 仅用于旧版 `local_novel_mcp.py`。让 WebUI 经 `read_novel_file(path="skill:<名>")` 读取小说目录之外的几份技能/说明文件，默认为空（不暴露目录外文件）。字符串，条目 `名字=文件路径` 用 `;` 或换行分隔，路径支持 `~`，如 `"retro=~/skills/retro/SKILL.md;style=~/skills/style/SKILL.md"`；环境变量 `NOVEL_SKILL_MAP`，改后重启 `local_novel_mcp.py` |
+| `magpie_provider` | 可选。`--sync-magpie` 要同步的 Magpie provider 的 id；未设时 `--sync-magpie` 跳过并提示 |
 | `browsermcp_bridge` | 可选。BrowserMCP 桥脚本路径，后备轨道的第一档驱动；不设则直接用 Playwriter / playwright-cli |
 
-示例文件里的 `<YOUR_...>` 是占位符，不是可用值；可选字段（`service_name` 及之后）不在示例文件里，需要时手动加键，写成 `""` 等同于没填。每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`、`WEBUI_SYSTEM_PROMPT`、`COLAB_NOTEBOOKS_DIR`、`NOVEL_ROOT`、`COLAB_BROWSERMCP_BRIDGE`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符（可选项则为空）。其他可调环境变量：
+示例文件里的 `<YOUR_...>` 是占位符，不是可用值；可选字段（`service_name` 及之后）不在示例文件里，需要时手动加键，写成 `""` 等同于没填。每个字段也可通过环境变量传入：`LLAMA_API_KEY`、`TS_CLIENT_ID`、`TS_CLIENT_SECRET`、`TAILNET_FQDN`、`LOCAL_TAILSCALE_IP`，以及 `G4HUIHUI_DRIVE_ID`、`GEMMA31B_DRIVE_ID`、`RVN27B_DRIVE_ID`、`GLM53_DRIVE_ID`、`WEBUI_SYSTEM_PROMPT`、`COLAB_NOTEBOOKS_DIR`、`MAGPIE_PROVIDER`、`COLAB_BROWSERMCP_BRIDGE`。读取优先级依次为：`.secrets.json` -> 环境变量 -> 占位符（可选项则为空）。其他可调环境变量：
 
 | 环境变量 | 作用 |
 |---|---|
@@ -287,7 +286,7 @@ python -X utf8 scripts/local_mcp.py status
 python -X utf8 scripts/local_mcp.py stop
 ```
 
-首次启动会创建 `~/.config/colab-cli/local-mcp.json`，只在该文件中保存专用随机令牌和 `cwd`；已有配置不会被覆盖。首次工作目录优先取 `LOCAL_MCP_CWD`，兼容 `NOVEL_ROOT` / `novel_root`，未配置时用 `~/Documents/Colab创作`（存在时），否则 `~/Documents`。修改配置后重启桥生效。日志在同目录的 `local-mcp.log`，不记录令牌或命令正文，启动前超过 1 MB 会只保留末尾 256 KB。
+首次启动会创建 `~/.config/colab-cli/local-mcp.json`，只在该文件中保存专用随机令牌和 `cwd`；已有配置不会被覆盖。首次工作目录取 `LOCAL_MCP_CWD`，未设置时用 `~/Documents`。修改配置后重启桥生效。日志在同目录的 `local-mcp.log`，不记录令牌或命令正文，启动前超过 1 MB 会只保留末尾 256 KB。
 
 `start` 会先检查 Node.js 和全局 `@earendil-works/pi-coding-agent`（`npm i -g`）是否存在，缺一项就报错退出、不写配置。默认只监听 `127.0.0.1:3426`；配置了有效的 `local_tailscale_ip` 时再额外监听 `<local_tailscale_ip>:3426` 供云端隧道连入（地址尚未就绪时每 15 秒重试，本机监听继续工作），默认不绑定 `0.0.0.0`。显式设了 `LOCAL_MCP_HOST` 或传 `start --host <地址>` 时只绑该地址；后续 `status`、`stop` 也要带相同的 `--host`，或在各次命令中保留相同的环境变量。`colab_cli.py start` 只在配置了 `local_tailscale_ip`（或设 `COLAB_LOCAL_MCP_AUTO=1`）时才顺带拉起本机桥。
 
@@ -299,7 +298,6 @@ Colab CLI 在开始保活时自动启动桥；[Colab-yoga v0.5.0+](https://githu
 
 更新脚本不会替换已经运行的桥进程。升级后等当前工具调用完成，再执行一次 `stop` 和 `start` 使监听变更生效；无需重启 GPU 或模型。
 
-旧 `local_novel_mcp.py` 保留兼容，但升级前要先关闭它以腾出 3426。旧 `local_novel_fs` 条目、`read_novel_file` 等工具名以及 `skill:名称` 路径不适用于新桥；在私有客户端配置和系统提示中迁移为四个原生工具与真实文件路径。回退时关闭新桥，再运行旧脚本。
 
 隔离验证（仅使用临时文件和空闲端口，不分配 GPU）：
 
@@ -327,7 +325,6 @@ python -X utf8 check_local_mcp_bind.py
 | `scripts/colab_meter.py` | 后备轨道：零 OAuth status / start / stop CLI 与双轨 CU 账单 |
 | `scripts/colab_pw.mjs` | Playwriter 后备后端（支持 __ANY__ 标签页复用模式） |
 | `scripts/local_mcp.py` / `.mjs` | 专用令牌鉴权的 Pi 原生工具与生命周期 helper |
-| `scripts/local_novel_mcp.py` | 保留兼容的旧版小说工具 |
 | `scripts/secrets_config.py` | .secrets.json / 环境变量 / 占位符加载器；示例占位符一律视为“未填写” |
 | `scripts/stdio_utf8.py` | 把 stdout/stderr 强制成 UTF-8，各入口脚本共用 |
 | `scripts/parallel_download.py` | 多进程并发下载器参考实现 |
@@ -336,7 +333,6 @@ python -X utf8 check_local_mcp_bind.py
 | `scripts/update-pi-provider.ps1` | 将服务端点注册进本地 pi provider 列表 |
 | `scripts/test_*.py` | 单元测试：保活与 CLI、内核与启动指纹、Colab-yoga 对接、首次运行安全（占位符、失败释放、可选项）、本地 MCP、计费、基准 |
 | `references/` | 各模型说明、CU 预算核算、Tailscale 与远程接入指南 |
-| `debug-runs/` | 2026-11-07 T4 对照/心跳 A/B 实验与 G4 长稳测试日志 |
 | `notebooks/` | 脱敏后的生成版 Notebook；`notebooks/private/`（git 忽略）放本地私有构建 |
 | `.secrets.example.json` | 配置模板 |
 

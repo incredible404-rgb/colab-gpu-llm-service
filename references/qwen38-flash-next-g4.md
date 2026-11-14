@@ -1,6 +1,6 @@
 # Swift-1.5-Flash-Next-Heretic-V2 (综合 1 · 原生破限版) on Colab G4
 
-当前为 **原生 Heretic v2 破限版**（`jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer` `IQ4_XS-plus` 94.70 GB 6 分片 + `ukisai` `mmproj-BF16` 视觉头 + `unsloth` `MTP Q4_K_M` 投机解码头，不挂 LoRA）。**本职定位：中文长篇小说共创 + 高智商全能黄金配置**，多轮改稿最优参数（`--parallel 1 -c 262144`、`--cache-ram` 16–64 GiB 动态上限（PLE 分片常驻，其余内存盘分片加载后删副本）、`--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0` 模型卡默认采样、`--spec-draft-n-max 3 --spec-draft-p-min 0.48`、`--batch-size 4096 --predict 65536`、`--slot-save-path`）以及启动后免密自动弹出 WebUI（`http://qwen.<YOUR_TAILNET>.ts.net:443/`）。
+当前为 **原生 Heretic v2 破限版**（`jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer` `IQ4_XS-plus` 94.70 GB 6 分片 + `ukisai` `mmproj-BF16` 视觉头 + `unsloth` `MTP Q4_K_M` 投机解码头，不挂 LoRA）。**本职定位：高智商全能黄金配置**，多轮改稿最优参数（`--parallel 1 -c 262144`、`--cache-ram` 16–64 GiB 动态上限（PLE 分片常驻，其余内存盘分片加载后删副本）、`--temp 1.0 --top-p 0.95 --top-k 20 --min-p 0` 模型卡默认采样、`--spec-draft-n-max 3 --spec-draft-p-min 0.48`、`--batch-size 4096 --predict 65536`、`--slot-save-path`）以及启动后免密自动弹出 WebUI（`http://qwen.<YOUR_TAILNET>.ts.net:443/`）。
 
 ## 0. 思考档位与采样参数
 

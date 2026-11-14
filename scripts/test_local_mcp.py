@@ -188,7 +188,7 @@ class StartBridgeOnDemandTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(m, 'tailscale_bind_ip', return_value=ip), \
                 mock.patch.object(cli, 'local_mcp', return_value={'ok': True, 'started': True, 'url': 'u'}) as helper, \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            cli.start_novel_mcp()
+            cli.start_local_mcp()
         return helper, out.getvalue()
 
     def test_without_a_tailscale_ip_nothing_starts_or_prints(self):
@@ -208,23 +208,23 @@ class StartBridgeOnDemandTests(unittest.TestCase):
 class SharedBridgeCleanupTests(unittest.TestCase):
     def test_another_gpu_assignment_keeps_the_shared_bridge(self):
         with mock.patch.object(cli, 'usage', return_value={'active': 1}), mock.patch.object(cli, 'local_mcp') as helper:
-            cli.stop_novel_mcp()
+            cli.stop_local_mcp()
         helper.assert_not_called()
 
     def test_unknown_account_state_keeps_the_shared_bridge(self):
         with mock.patch.object(cli, 'usage', side_effect=RuntimeError('offline')), \
                 mock.patch.object(cli, 'local_mcp') as helper, contextlib.redirect_stdout(io.StringIO()):
-            cli.stop_novel_mcp()
+            cli.stop_local_mcp()
         helper.assert_not_called()
 
     def test_confirmed_empty_account_stops_through_the_helper(self):
         with mock.patch.object(cli, 'usage', return_value={'active': 0}), \
                 mock.patch.object(cli, 'local_mcp', return_value={'ok': True}) as helper:
-            cli.stop_novel_mcp()
+            cli.stop_local_mcp()
         helper.assert_called_once_with('stop', timeout=15.0)
 
     def test_existing_keeper_still_checks_the_local_bridge(self):
-        with mock.patch.object(cli, 'start_novel_mcp') as start, \
+        with mock.patch.object(cli, 'start_local_mcp') as start, \
                 mock.patch.object(cli, 'keepalive_state', return_value={'pid': 12}), \
                 mock.patch.object(cli, '_pid_alive', return_value=True), contextlib.redirect_stdout(io.StringIO()):
             cli.start_keepalive('fixture', 30)

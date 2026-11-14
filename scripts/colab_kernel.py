@@ -100,7 +100,7 @@ def _drivefs_db() -> Path | None:
 
 # 3.8fn 默认主力注册表：huihui-ai v2 方向消融（不动专家层，作者最新 calibration3 / imatrix_micro3 重校的 unsloth-UD-Q4_K_XL-V2）。
 # 4 片共 111.33 GB（103.69 GiB），第 2 片含 30.53 GiB IQ4_NL PLE 表 + 前 11 层，纯 GPU 主干 73.16 GiB（78.55 GB），
-# 在单张 G4 96GB 上实测显存占用 92,337 / 97,887 MiB，小说解码 104.4 tok/s（MTP 接受率 56.2%）。
+# 在单张 G4 96GB 上实测显存占用 92,337 / 97,887 MiB，解码 104.4 tok/s（MTP 接受率 56.2%）。
 _HUIHUI_REPO = 'huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated-v2-GGUF'
 _HUIHUI_REV = 'cbc7fba13f1939ac3fa42b18d77ccf43847d74ef'
 _HUIHUI_SUBDIR = 'unsloth-UD-Q4_K_XL-V2'
@@ -114,12 +114,14 @@ _HUIHUI_SHARDS = [
 MODELS: dict[str, dict] = {
     'qwen38-huihui-v2': {
         'slug': 'qwen38-huihui-v2',
+        # Shown by Colab-yoga's model list (exported with the runners).
+        'display': {'name': 'Qwen3.8-Flash-Next (Huihui v2)', 'tags': ['125B-A6B MoE', 'UD-Q4_K_XL', '视觉', 'MTP'], 'note': '默认主力 · 104 tok/s'},
         'notebook': 'qwen3.8-flash-next-huihui-v2-g4-colab.ipynb',
         'drive_key': 'g4huihui_drive_id',
         'env_key': 'G4HUIHUI_DRIVE_ID',
         'placeholder': '<YOUR_G4HUIHUI_NOTEBOOK_DRIVE_ID>',
         'alias': 'Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL',
-        'title': 'Huihui-Qwen3.8-Flash-Next-abliterated-v2 · Colab G4 中文长篇小说共创与全能主力服务（UD-Q4_K_XL-V2 原生消融破限）',
+        'title': 'Huihui-Qwen3.8-Flash-Next-abliterated-v2 · Colab G4 全能主力服务（UD-Q4_K_XL-V2 原生消融破限）',
         'banner': '🔓 Huihui v2 原生消融 125B · UD-Q4_K_XL-V2，满速运行',
         'root_dir': '/content/qwen38-huihui-v2',
         'ts_hostname': 'qwen-g4huihui-colab',
@@ -171,6 +173,8 @@ MODELS: dict[str, dict] = {
     },
     'gemma4-31b': {
         'slug': 'gemma4-31b',
+        # Shown by Colab-yoga's model list (exported with the runners).
+        'display': {'name': 'Gemma-4-31B (ARA Heretic Q8_0)', 'tags': ['31B 稠密', 'Q8_0', '视觉', 'MTP'], 'note': '约 1/3 显存，加载最快'},
         'notebook': 'gemma4-31b-g4-colab.ipynb',
         'drive_key': 'gemma31b_drive_id',
         'env_key': 'GEMMA31B_DRIVE_ID',
@@ -225,6 +229,8 @@ MODELS: dict[str, dict] = {
     },
     'qwen38-27b-rvn': {
         'slug': 'qwen38-27b-rvn',
+        # Shown by Colab-yoga's model list (exported with the runners).
+        'display': {'name': 'Qwen3.8-27B (RVN Heretic BF16)', 'tags': ['27B 稠密', 'BF16', '视觉', 'MTP'], 'note': '原精度双重 ARA 破限'},
         'notebook': 'qwen3.8-27b-rvn-g4-colab.ipynb',
         'drive_key': 'rvn27b_drive_id',
         'env_key': 'RVN27B_DRIVE_ID',
@@ -279,6 +285,8 @@ MODELS: dict[str, dict] = {
     },
     'glm53-flash': {
         'slug': 'glm53-flash',
+        # Shown by Colab-yoga's model list (exported with the runners).
+        'display': {'name': 'GLM-5.3-Flash (320B-A18B)', 'tags': ['320B-A18B MoE', 'GSQ-RCO-Q4', '视觉', '部分专家放内存'], 'note': '最大的一个'},
         'notebook': 'glm5.3-flash-abliterated-g4-colab.ipynb',
         'drive_key': 'glm53_drive_id',
         'env_key': 'GLM53_DRIVE_ID',
@@ -333,6 +341,55 @@ ALL_MODELS: dict[str, dict] = {**ARCHIVED_MODELS, **MODELS}
 # effort_prompts 四档文本必须两两不同：llama.cpp 靠渲染差异探测 reasoning_effort_levels，/props 门禁要求报齐四档。
 # 只在生成端用、不写进首格 SPEC 的登记项。
 _GEN_ONLY_KEYS = ('notebook', 'drive_key', 'env_key', 'placeholder', 'title', 'banner')
+
+def model_provenance_for_spec(spec: dict) -> dict:
+    """Return structured, re-downloadable provenance metadata for a model spec."""
+    files = spec.get('files') or []
+    model_files = [f for f in files if f.get('role') in ('model', 'shard')]
+    primary = model_files[0] if model_files else (files[0] if files else {})
+    repo = str(primary.get('repo') or '')
+    rev = str(primary.get('rev') or '')
+    gguf = str(primary.get('path') or '')
+    info = {
+        'alias': str(spec.get('alias') or ''),
+        'slug': str(spec.get('slug') or ''),
+        'title': str(spec.get('title') or ''),
+        'repo': repo,
+        'rev': rev,
+        'gguf': gguf,
+        'shards': len(model_files),
+        'hf_url': f'https://huggingface.co/{repo}' if repo else '',
+    }
+    return info
+
+
+def lookup_model_provenance(identifier: str = '', gguf_path: str = '') -> dict | None:
+    """Match an alias, slug, or GGUF filename against ALL_MODELS (active + archived)."""
+    ident = (identifier or '').strip()
+    ident_low = ident.lower()
+    gguf_name = Path(gguf_path).name.lower() if (gguf_path or '').strip() else ''
+
+    # 1. Exact alias or slug match (active MODELS first, then ALL_MODELS)
+    for pool in (MODELS, ALL_MODELS):
+        for slug, spec in pool.items():
+            alias = str(spec.get('alias') or '')
+            if ident and (ident == alias or ident == slug or ident_low == alias.lower() or ident_low == slug.lower()):
+                return model_provenance_for_spec(spec)
+
+    # 2. GGUF filename match
+    if gguf_name:
+        for pool in (MODELS, ALL_MODELS):
+            for spec in pool.values():
+                for f in spec.get('files') or []:
+                    if f.get('role') in ('model', 'shard') and Path(str(f.get('path') or '')).name.lower() == gguf_name:
+                        return model_provenance_for_spec(spec)
+    return None
+
+
+# effort_prompts 四档文本必须两两不同：llama.cpp 靠渲染差异探测 reasoning_effort_levels，/props 门禁要求报齐四档。
+# 只在生成端用、不写进首格 SPEC 的登记项。
+_GEN_ONLY_KEYS = ('notebook', 'drive_key', 'env_key', 'placeholder', 'title', 'banner', 'display')
+
 
 def service_name(config: dict) -> str:
     """Tailscale Service name (the part after svc:), default 'qwen'.
@@ -1563,7 +1620,7 @@ for name in ('released-copies.json',):
         print(name + ':', p.read_text(encoding='utf-8')[:400])
 """
 
-    verify_code = f"""# 【调试用 · 手动运行】全链路验收：接口 / 思考档位切换 / 速度 / 中文小说共创 / 工具调用
+    verify_code = f"""# 【调试用 · 手动运行】全链路验收：接口 / 思考档位切换 / 速度 / 中文长文生成 / 工具调用
 import json, time
 from pathlib import Path
 import requests
@@ -1578,14 +1635,12 @@ models = requests.get(base + '/v1/models', headers=headers, timeout=15).json()
 print('模型：', [m['id'] for m in models['data']])
 assert MODEL_ALIAS in [m['id'] for m in models['data']]
 
-novel = ('你是我的中文小说共创搭档。下面这段武侠场景需要你接着往下写：\\n'
-         '　　「风从断崖口灌进来，卷起满地碎雪。沈砚之握着半截断剑，指节发白。」\\n'
-         '请续写 200 字左右：只写正文，不要解释思路，以动作细节表现人物心虚但嘴硬。')
+prompt = '用中文写一段 200 字左右的说明文，讲清楚潮汐是怎么形成的。只写正文，不要解释思路，不要分点。'
 
 for effort in ('high', 'xhigh'):
     t0 = time.monotonic()
     r = requests.post(base + '/v1/chat/completions', headers=headers, timeout=600,
-                      json={{'model': MODEL_ALIAS, 'messages': [{{'role': 'user', 'content': novel}}],
+                      json={{'model': MODEL_ALIAS, 'messages': [{{'role': 'user', 'content': prompt}}],
                             'reasoning_effort': effort, 'temperature': float(CUR_SPEC.get('temp', {json.dumps(spec['temp'])})), 'max_tokens': 512}})
     r.raise_for_status()
     d = r.json()
@@ -1889,9 +1944,14 @@ def _run_magpie(launcher: tuple[str, ...], *args: str, **kw) -> subprocess.Compl
     return subprocess.run(argv, **kw)
 
 
-def sync_magpie_models():
+def sync_magpie_models(provider: str):
+    """Make the Magpie provider `provider` list the active MODELS (archived ones removed and reset)."""
     # `magpie provider models <id> <ids…>` 是整体替换：先读现有模型（model list + model specs）再取并集，
     # 同时剔除并 reset 已移入 ARCHIVED_MODELS 的归档模型，确保 Magpie 不残留归档僵尸条目。
+    if not provider:
+        print('magpie_provider is not set (.secrets.json or MAGPIE_PROVIDER): skipped --sync-magpie. '
+              'Set it to the id of the Magpie provider that points at this service.')
+        return
     launcher = _magpie_launcher()
     if launcher is None:
         print('Magpie CLI not found on PATH; skipped --sync-magpie (it is an optional gateway, nothing else depends on it).')
@@ -1899,16 +1959,16 @@ def sync_magpie_models():
     listed = _run_magpie(launcher, 'model', 'list', capture_output=True, text=True, encoding='utf-8', check=True).stdout
     specs = _run_magpie(launcher, 'model', 'specs', capture_output=True, text=True, encoding='utf-8', check=True).stdout
     existing = [tok.split('/', 1)[1] for tok in (listed + '\n' + specs).split()
-                if tok.startswith('qwen-colab/') and not tok.endswith('/*')]
+                if tok.startswith(provider + '/') and not tok.endswith('/*')]
     aliases = [m['alias'] for m in MODELS.values()]
     archived_aliases = {m['alias'] for s, m in ARCHIVED_MODELS.items() if s not in MODELS} - set(aliases)
     keep = [a for a in dict.fromkeys(existing + aliases) if a not in archived_aliases]
     for arch in sorted(archived_aliases & set(existing)):
         for sub in ('spec', 'efforts', 'wire', 'name'):
-            _run_magpie(launcher, 'model', sub, f'qwen-colab/{arch}', '--reset', capture_output=True, check=False)
-    _run_magpie(launcher, 'provider', 'models', 'qwen-colab', *keep, check=True)
+            _run_magpie(launcher, 'model', sub, f'{provider}/{arch}', '--reset', capture_output=True, check=False)
+    _run_magpie(launcher, 'provider', 'models', provider, *keep, check=True)
     for alias in aliases:
-        _run_magpie(launcher, 'model', 'spec', f'qwen-colab/{alias}', '--context', '262144', '--output', '65536',
+        _run_magpie(launcher, 'model', 'spec', f'{provider}/{alias}', '--context', '262144', '--output', '65536',
                     '--vision', 'on', '--reasoning', 'low,medium,high,xhigh', check=True)
 
 
@@ -2050,6 +2110,7 @@ def export_yoga_runners(config: dict, out_path: Path | None = None) -> bool:
             'slug': slug,
             'alias': spec['alias'],
             'title': spec['title'],
+            **spec.get('display', {}),
             'root_dir': spec['root_dir'],
             'min_vram_mib': spec['min_vram_mib'],
             'files': [
@@ -2123,7 +2184,7 @@ def main():
                                                        or yoga_runners_path().parent.exists())
         export_yoga_runners(cfg)
     if '--sync-magpie' in args:
-        sync_magpie_models()
+        sync_magpie_models((load_config([])[0].get('magpie_provider') or '').strip())
     return 1 if refused else 0
 
 

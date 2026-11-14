@@ -114,7 +114,6 @@ CLI_DIR = Path.home() / '.config/colab-cli'
 CLI_PYTHONW, CLI_PYTHON = _cli_pythons()
 KEEPALIVE = Path(__file__).with_name('colab_keepalive.py')
 # local_mcp.py: the Pi-native read/write/edit/bash bridge this CLI starts and stops with a GPU session.
-# local_novel_mcp.py: the standalone novel-folder tool server, run by hand; this CLI never launches it.
 LOCAL_MCP = Path(__file__).with_name('local_mcp.py')
 # Not exported by subprocess on every Python build. Win32 CREATE_BREAKAWAY_FROM_JOB.
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
@@ -295,7 +294,7 @@ def local_mcp(*args: str, timeout: float = 30.0) -> dict:
     return result if isinstance(result, dict) else {'ok': False, 'error': 'local_mcp.py %s: not a JSON object' % args[0]}
 
 
-def start_novel_mcp() -> None:
+def start_local_mcp() -> None:
     """Start the local MCP bridge when a GPU session starts, if it is not already serving.
 
     Skipped silently unless a valid local_tailscale_ip is configured (or COLAB_LOCAL_MCP_AUTO=1). The launcher
@@ -320,7 +319,7 @@ def start_novel_mcp() -> None:
         print('[colab_cli] local_mcp not started: %s' % result.get('error'), flush=True)
 
 
-def stop_novel_mcp(*, account_idle: bool = False) -> None:
+def stop_local_mcp(*, account_idle: bool = False) -> None:
     """Stop the shared bridge only after the account confirms that no GPU still needs it."""
     if not LOCAL_MCP.is_file():
         return
@@ -339,7 +338,7 @@ def stop_novel_mcp(*, account_idle: bool = False) -> None:
 
 
 def start_keepalive(session: str, idle_min: int):
-    start_novel_mcp()
+    start_local_mcp()
     st = keepalive_state(session)
     if st and _pid_alive(int(st.get('pid') or 0)):
         print('[colab_cli] keep-alive already running (pid %d)' % st['pid'], flush=True)
@@ -463,7 +462,7 @@ def stop_keepalive(session: str):
     delete_keepalive_task(session)
     (CLI_DIR / ('keepalive-%s.json' % session)).unlink(missing_ok=True)
     if not keepalive_state_sessions():
-        stop_novel_mcp()
+        stop_local_mcp()
 
 
 def _config():
@@ -1005,7 +1004,7 @@ def cmd_stop(names: list[str]):
                   'e.g. Colab-yoga), so it was left running. `stop --all` releases every assignment on the account, '
                   'so run it only when none of them is wanted.' % (u['active'], ', '.join(named) or 'nothing'), flush=True)
     if u['active'] == 0:
-        stop_novel_mcp(account_idle=True)
+        stop_local_mcp(account_idle=True)
     print('Active assignments: %d | Burn rate: %.2f CU/h | Balance: %.2f CU' % (u['active'], u['rate'] or 0, u['balance'] or 0))
     return 0 if u['active'] == 0 else 1
 

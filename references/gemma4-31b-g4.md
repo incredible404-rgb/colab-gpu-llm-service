@@ -7,7 +7,7 @@
 | slug / 生成脚本 | `gemma4-31b` / [`scripts/make_31b_gemma4_notebook.py`](../scripts/make_31b_gemma4_notebook.py) |
 | 笔记本 | [`notebooks/gemma4-31b-g4-colab.ipynb`](../notebooks/gemma4-31b-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `gemma31b_drive_id`） |
 | CLI 启动 | `python -X utf8 scripts/colab_cli.py start gemma4-31b`（或 `launch gemma4-31b`） |
-| Magpie 模型 ID | `qwen-colab/Gemma-4-31B-it-ARA-Heretic-Q8_0` |
+| Magpie 模型 ID | `<magpie_provider>/Gemma-4-31B-it-ARA-Heretic-Q8_0` |
 
 ## 权重与组件
 

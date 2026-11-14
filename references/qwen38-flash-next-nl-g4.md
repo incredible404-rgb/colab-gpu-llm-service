@@ -6,7 +6,7 @@
 |---|---|
 | slug / 生成脚本 | `qwen38-fn-nl` / [`scripts/make_g4_fn_nl_notebook.py`](../scripts/make_g4_fn_nl_notebook.py) |
 | 笔记本 | [`notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb`](../notebooks/qwen3.8-flash-next-nl-g4-colab.ipynb)（Drive ID 存 `.secrets.json` 的 `g4nl_drive_id`） |
-| Magpie 模型 ID | `qwen-colab/Swift-1.5-Qwen3.8-Flash-Next-IQ4_NL` |
+| Magpie 模型 ID | `<magpie_provider>/Swift-1.5-Qwen3.8-Flash-Next-IQ4_NL` |
 | 主权重 | `jackjusko/Swift-1.5-Flash-Next-Heretic-ReverseEngineer` @ `bd3bca068a544d459cf42902bf21a0fac00ec853`，根目录 `Swift-1.5-Qwen3.8-Flash-Next-Heretic-V2-IQ4_NL-0000{1..8}-of-00008.gguf`，共 108.9 GB；大小与 SHA-256 见 `colab_kernel.py` 的 `_NL_SHARDS` |
 | 视觉头 / MTP | 与 `qwen38-fn` 相同 |
 
@@ -27,7 +27,7 @@
 | 3.9 万 token 长提示预填 | 4,295 tok/s（首 token 约 9.2 s） | 4,168 tok/s（约 9.5 s） |
 | 长提示后解码 | 137.6 tok/s | 122.6 tok/s |
 | 代码题解码（通过） | 192 tok/s | 191 tok/s |
-| 约 800 字小说解码 | 100.0 tok/s | 99.5 tok/s |
+| 约 800 字长文解码 | 100.0 tok/s | 99.5 tok/s |
 | 3.9 万 token 中间藏一句的检索 | 答对 | 答对 |
 
 - 速度两版基本相同：6B 激活下解码不卡在显存带宽，多出的 14 GB 权重没有拖慢。
