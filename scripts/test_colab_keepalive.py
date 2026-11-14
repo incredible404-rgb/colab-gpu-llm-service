@@ -70,6 +70,22 @@ class IdleTests(unittest.TestCase):
 
 
 class KernelBeatTests(unittest.TestCase):
+    def test_yoga_activity_uses_minimal_health_without_requesting_private_status(self):
+        payload = {'ok': True, 'idle_remaining_seconds': 900, 'is_downloading': True,
+                   'is_loading_vram': False, 'llm_online': True, 'idle_timeout_minutes': 30}
+        opener = mock.Mock()
+        opener.open.return_value = io.BytesIO(json.dumps(payload).encode())
+        output = io.StringIO()
+        with mock.patch('builtins.open', mock.mock_open()), \
+                mock.patch('urllib.request.build_opener', return_value=opener), \
+                contextlib.redirect_stdout(output):
+            exec(compile(ka.BEAT_CODE, '<keeper-beat>', 'exec'), {})
+        self.assertEqual(opener.open.call_args.args[0], 'http://127.0.0.1:7860/health')
+        reported = json.loads(output.getvalue().removeprefix('YOGA_STATUS '))
+        self.assertEqual(reported, {key: payload[key] for key in
+                                   ('idle_remaining_seconds', 'is_downloading', 'is_loading_vram')})
+
+
     def test_beat_is_a_short_colab_exec(self):
         argv = ka.beat_argv('s', 'b.py')
         self.assertEqual(argv[1:], ['exec', '-s', 's', '-f', 'b.py', '--timeout', '60'])

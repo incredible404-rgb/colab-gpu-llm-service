@@ -168,7 +168,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
 | **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | 备用与兜底 | ① 网页首格按钮与第 4 格免释放热切换模型；② CLI OAuth 异常时复用已登录 Edge；③ 强杀 CLI 无法按名停止的 `[?]` 幽灵会话 |
 
 - **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli` 0.7.5 创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一次内核心跳（守护进程按 `colab exec` 的方式自己连内核执行，免去每拍起 CLI 进程；失败自动退回 `colab exec`），每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
-- **与 Colab-yoga 的保活不打架**：心跳那段代码顺带在 VM 里读一次 `http://127.0.0.1:7860/api/status`（2 秒超时，失败忽略，只打印 `idle_remaining_seconds`、`is_downloading`、`is_loading_vram`）。Colab-yoga 在下载/装载模型，或它的空闲倒计时比上次读数大（有人在托盘里续了时、改了空闲时间），守护进程就把这算作活动，推迟 45 分钟空闲停机和“服务一直没起来”停机。没跑 Colab-yoga 时没有这一行输出，行为与以前完全一样。
+- **与 Colab-yoga 的保活不打架**：心跳那段代码顺带在 VM 里读一次 `http://127.0.0.1:7860/health`（2 秒超时，失败忽略，只打印 `idle_remaining_seconds`、`is_downloading`、`is_loading_vram`）。Colab-yoga 在下载/装载模型，或它的空闲倒计时比上次读数大（有人在托盘里续了时、改了空闲时间），守护进程就把这算作活动，推迟 45 分钟空闲停机和“服务一直没起来”停机。没跑 Colab-yoga 时没有这一行输出，行为与以前完全一样。
 - **Colab-yoga**（[github.com/incredible404-rgb/Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)，它的 agent 技能在该仓库的 `skills/colab-yoga`，需另装）是 Windows 托盘 GPU 管理台，只管 LLM 服务（llama-server :8081、Web UI、Magpie、MCP 文件桥），不含视频/生图/ComfyUI。它管的是 GPU：费用、当前跑哪个模型、各入口是否通、运行时是否只在被使用期间保活；对话流量不经过它。唤醒时它不杀 `:8081` 的 `llama-server` 和 MCP 转发器，只替换自己旧的 server 进程（`/content/colab_yoga_server.py`，旧名 `/content/app.py`）。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都经 `~/.config/colab-cli/sessions.json` 复用同一台 G4，不重复开卡。`start` 复用了别人的会话（例如 Colab-yoga 的 `easycolab`）时，失败只报告、不会替你停掉它；`colab_cli.py yoga wake` 以 bridge 输出里出现 `WAKE_URL:` 行判定唤醒成功，没出现就不拉起保活，也不返回成功。
 
 ### 让 Colab-yoga 认得本仓库的模型（runners，固定三步）

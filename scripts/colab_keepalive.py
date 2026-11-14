@@ -37,7 +37,7 @@ idle); if it never answers within the same limit, the session is stopped so a
 failed boot cannot burn CU until the 24 h cap.
 
 Colab-yoga (optional tray app) manages the same runtime with its own idle timer. The beat code
-therefore also reads its status at http://127.0.0.1:7860/api/status inside the VM (2 s limit,
+therefore also reads its status at http://127.0.0.1:7860/health inside the VM (2 s limit,
 failure ignored) and prints one YOGA_STATUS line. A model download or VRAM load in progress, or
 an idle countdown that went up since the last reading (someone pressed "extend"), counts as
 activity for both clocks above. Without Colab-yoga there is no such line and nothing changes.
@@ -76,7 +76,7 @@ BEAT_CODE = (
     "        f.write(str(time.time()))\n"
     "    try:\n"
     "        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
-    "        data = json.load(opener.open('http://127.0.0.1:7860/api/status', timeout=2))\n"
+    "        data = json.load(opener.open('http://127.0.0.1:7860/health', timeout=2))\n"
     "        keys = ('idle_remaining_seconds', 'is_downloading', 'is_loading_vram')\n"
     "        print('YOGA_STATUS ' + json.dumps({k: data.get(k) for k in keys}))\n"
     "    except Exception:\n"
