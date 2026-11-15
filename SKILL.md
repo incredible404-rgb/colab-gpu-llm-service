@@ -1,6 +1,6 @@
 ---
 name: colab-gpu-llm-service
-description: 在 Google Colab 付费 GPU（默认 G4 RTX PRO 6000 96GB）上部署并管理 GGUF 大模型服务（llama.cpp、MTP 投机解码），经 Tailscale 固定域名提供 OpenAI 兼容接口，无头 CLI + 30 秒内核心跳保活。用于首次安装与第一次开机、启动/停止/续命 Colab GPU、查 CU 余额与燃烧率、新增/切换/归档模型、显存与分片核算、清理 [?] 幽灵实例、排障，以及对接可选的 Colab-yoga 托盘管理台。Deploy and run GGUF LLMs on a paid Colab G4 via google-colab-cli (kernel heartbeat, Tailscale Service, CU accounting).
+description: 在 Google Colab 付费 GPU（默认 G4 96GB）上部署并管理 GGUF 大模型服务（llama.cpp、MTP 投机解码），经 Tailscale 提供 OpenAI 兼容接口，内核心跳保活。用于首次安装开机、启停续命 Colab GPU、查 CU 余额与燃烧率、增删切换模型、显存核算、清理 [?] 幽灵实例、排障、对接 Colab-yoga 托盘。Deploy and run GGUF LLMs on a paid Colab G4 via google-colab-cli (heartbeat, Tailscale, CU accounting).
 ---
 
 # Colab GPU LLM Service
