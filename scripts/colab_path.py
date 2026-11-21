@@ -14,7 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-INSTALL_HINT = ('python -m pip install uv && python -m uv tool install "google-colab-cli==0.7.5" '
+# The google-colab-cli release this repository is written and tested against. Colab-yoga pins the same one in
+# bridge/requirements.txt: both read the same OAuth token, which colab-cli keeps in the OS keyring since 0.7.6.
+COLAB_CLI_VERSION = '0.8.0'
+INSTALL_HINT = ('python -m pip install uv && python -m uv tool install "google-colab-cli==%s" ' % COLAB_CLI_VERSION +
                 '(then `python -m uv tool dir --bin` prints the folder holding colab; no terminal restart needed)')
 
 

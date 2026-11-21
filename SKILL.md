@@ -24,7 +24,7 @@ description: 在 Google Colab 付费 GPU（默认 G4 96GB）上部署并管理 G
 | Colab 付费额度 | 付费计算单元（CU）：Colab Pro / Pro+ / Ultra 订阅或按量购买，账号能选 G4。免费档不行。费率与额度会变，估算见 [`references/cu-budget.md`](references/cu-budget.md) | `colab usage`（装好 CLI 后） |
 | 主机 | Windows 10/11 + Python 3.10+（`google-colab-cli` 需 3.12+，`uv` 会自动管理）+ Git。脚本用计划任务与 `taskkill` 清理保活进程，按 Windows 编写；macOS/Linux 未验证 | `python --version` |
 | Python 依赖 | 仅 `requests`，其余为标准库 | `pip install requests` |
-| 官方 Colab CLI | **google-colab-cli 0.7.5**（需 Python ≥ 3.12，`uv tool install` 自动管理，或复用 Colab-yoga 内置 Python），固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
+| 官方 Colab CLI | **google-colab-cli 0.8.0**（需 Python ≥ 3.12，`uv tool install` 自动管理，或复用 Colab-yoga 内置 Python），固定此版本：保活机制按它 21–35 分钟回收实例的行为设计 | 见下 |
 | Tailscale | 本机已安装并登录（客户端 ≥ 1.78）；tailnet 里建好 `svc:qwen` Service、`tag:colab` 标签、OAuth 客户端，并在 DNS 设置里开启 **MagicDNS** 与 **HTTPS Certificates** | `tailscale version` |
 | HF 令牌（可选） | 现役 4 个模型都是公开权重，不需要；仅受限/限速模型才用；本机 `HF_TOKEN` 环境变量或 `~/.cache/huggingface/token` 会被自动转发到运行时 | |
 | Colab-yoga（可选） | Windows 托盘 / macOS 菜单栏 GPU 管理台，只管 LLM 服务（不含视频/生图/ComfyUI）：查看状态与 CU、空闲倒计时续时、切换模型、释放运行时。与本技能共用同一台 G4，不装不影响任何核心命令 | `python -X utf8 scripts/colab_cli.py yoga status` |
@@ -34,17 +34,17 @@ description: 在 Google Colab 付费 GPU（默认 G4 96GB）上部署并管理 G
 
 ```bash
 python -m pip install uv
-python -m uv tool install "google-colab-cli==0.7.5"
+python -m uv tool install "google-colab-cli==0.8.0"
 python -m uv tool dir --bin                         # 打印 colab 所在目录，默认 ~/.local/bin
 "$(python -m uv tool dir --bin)/colab" --version    # 不依赖 PATH 的调用方式（Git Bash）
 ```
 
 本仓库的脚本（`colab_cli.py`、保活守护进程）自己会在 PATH 之外去找 `colab`（`UV_TOOL_BIN_DIR`、`~/.local/bin`、`uv tool dir --bin`），所以 agent 装完直接跑后面的命令即可。只有想在人的终端里直接敲 `colab` 时才需要 `python -m uv tool update-shell`，且要重开那个终端。
 
-**首次授权（只做一次，由本人在自己的终端做）**，令牌存于 `~/.config/colab-cli/token.json`，之后 agent 直接复用：
+**首次授权（只做一次，由本人在自己的终端做）**，令牌存于系统凭据库（Windows 凭据管理器 / macOS 钥匙串里 colab CLI 自己的条目；0.7.5 留下的 `token.json` 首次使用时自动迁入并删除），之后 agent 直接复用：
 
 - 做法 A：本人在自己的终端跑 `colab sessions`，浏览器打开它打印的链接授权，把授权码粘回终端回车。
-- 做法 B（装了 Colab-yoga 时，不需要交互 stdin，agent 也能代跑两步）：先 `"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" auth_url`（Git Bash；cmd 里写成 `%LOCALAPPDATA%\Programs\Colab-yoga\...`，目录以 `COLAB_YOGA_DIR` 为准），把输出 JSON 里的 `auth_url` 交给本人打开授权；本人把页面给出的授权码回传后，再跑同一条命令，把末尾的 `auth_url` 换成 `auth_code <授权码>`。两边共用同一个 `token.json`。
+- 做法 B（装了 Colab-yoga 时，不需要交互 stdin，agent 也能代跑两步）：先 `"$LOCALAPPDATA/Programs/Colab-yoga/runtime/python.exe" -u "$LOCALAPPDATA/Programs/Colab-yoga/bridge/colab_yoga_bridge.py" auth_url`（Git Bash；cmd 里写成 `%LOCALAPPDATA%\Programs\Colab-yoga\...`，目录以 `COLAB_YOGA_DIR` 为准），把输出 JSON 里的 `auth_url` 交给本人打开授权；本人把页面给出的授权码回传后，再跑同一条命令，把末尾的 `auth_url` 换成 `auth_code <授权码>`。两边共用同一条令牌。
 
 授权完成后验证：`colab usage` 应显示 CU 余额。令牌失效时同样回到本节。
 
@@ -167,7 +167,7 @@ cd scripts && python -X utf8 -m unittest discover -p "test_*.py"
 | **Colab-yoga 托盘管理台**（可选） | 查看与管理 | 看状态与 CU、空闲倒计时续时、切换模型、释放；与 Track A 双向复用同一台 G4（共用 `~/.config/colab-cli/` 的令牌与会话） |
 | **Track B · 浏览器网页版 + 零 OAuth `/tun/m`** | 备用与兜底 | ① 网页首格按钮与第 4 格免释放热切换模型；② CLI OAuth 异常时复用已登录 Edge；③ 强杀 CLI 无法按名停止的 `[?]` 幽灵会话 |
 
-- **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli` 0.7.5 创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一次内核心跳（守护进程按 `colab exec` 的方式自己连内核执行，免去每拍起 CLI 进程；失败自动退回 `colab exec`），每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
+- **30 秒内核心跳（`colab_keepalive.py`）**：`google-colab-cli`（0.7.5–0.8.0）创建的实例若无新代码执行，21～35 分钟会被回收（推理流量、长阻塞单元、60s HTTP ping 均不算数）。`start` / `launch` / `yoga wake` 自动在后台每 30 秒执行一次内核心跳（守护进程按 `colab exec` 的方式自己连内核执行，免去每拍起 CLI 进程；失败自动退回 `colab exec`），每 60 秒 ping TFE，并轮询 `/slots`，满 45 分钟无推理自动 `colab stop`。电脑休眠心跳即停，约 20 分钟后云端自动回收。
 - **与 Colab-yoga 的保活不打架**：心跳那段代码顺带在 VM 里读一次 `http://127.0.0.1:7860/health`（2 秒超时，失败忽略，只打印 `idle_remaining_seconds`、`is_downloading`、`is_loading_vram`）。Colab-yoga 在下载/装载模型，或它的空闲倒计时比上次读数大（有人在托盘里续了时、改了空闲时间），守护进程就把这算作活动，推迟 45 分钟空闲停机和“服务一直没起来”停机。没跑 Colab-yoga 时没有这一行输出，行为与以前完全一样。
 - **Colab-yoga**（[github.com/incredible404-rgb/Colab-yoga](https://github.com/incredible404-rgb/Colab-yoga)，它的 agent 技能在该仓库的 `skills/colab-yoga`，需另装）是 Windows 托盘 GPU 管理台，只管 LLM 服务（llama-server :8081、Web UI、Magpie、MCP 文件桥），不含视频/生图/ComfyUI。它管的是 GPU：费用、当前跑哪个模型、各入口是否通、运行时是否只在被使用期间保活；对话流量不经过它。唤醒时它不杀 `:8081` 的 `llama-server` 和 MCP 转发器，只替换自己旧的 server 进程（`/content/colab_yoga_server.py`，旧名 `/content/app.py`）。先 `colab_cli.py start` 再在 Colab-yoga 里唤醒，或反过来，都经 `~/.config/colab-cli/sessions.json` 复用同一台 G4，不重复开卡。`start` 复用了别人的会话（例如 Colab-yoga 的 `easycolab`）时，失败只报告、不会替你停掉它；`colab_cli.py yoga wake` 以 bridge 输出里出现 `WAKE_URL:` 行判定唤醒成功，没出现就不拉起保活，也不返回成功。
 
@@ -237,7 +237,7 @@ Colab-yoga 起模型用的是本仓库导出的无头首格 `colab_kernel_runner
 | 现象 | 原因与处理 |
 |---|---|
 | `missing ... in .secrets.json / environment` | 必填四项（`api_key`、`ts_client_id`、`ts_client_secret`、`tailnet_fqdn`）为空，或还是示例文件里的 `<YOUR_...>` 占位符；回第 2 节填写。这个检查发生在分配 GPU 之前 |
-| `colab CLI not found` / `colab` 不是内部或外部命令 / `command not found` | 没装，或 uv 的工具目录不在 PATH。脚本已会自己去 `~/.local/bin` 和 `uv tool dir --bin` 找；还报这个错就是没装：按第 0 节 `python -m pip install uv` + `python -m uv tool install "google-colab-cli==0.7.5"`，不需要重开终端。`python -m uv tool list` 应能看到 `google-colab-cli` |
+| `colab CLI not found` / `colab` 不是内部或外部命令 / `command not found` | 没装，或 uv 的工具目录不在 PATH。脚本已会自己去 `~/.local/bin` 和 `uv tool dir --bin` 找；还报这个错就是没装：按第 0 节 `python -m pip install uv` + `python -m uv tool install "google-colab-cli==0.8.0"`，不需要重开终端。`python -m uv tool list` 应能看到 `google-colab-cli` |
 | `colab CLI is not authorized ...` | 没授权，或令牌失效（脚本关闭了 stdin，所以立刻报错而不是卡住）。把报错里的链接交给本人，按第 0 节“首次授权”做（做法 A 或 B）；agent 不要自己等输入 |
 | `preflight failed, nothing was allocated` | 开卡前的本地预检没过，按列出的条目逐项修（CLI 的 `pythonw.exe`、本机 Tailscale 在线、Tailscale OAuth 凭据）；确认无碍再加 `--skip-preflight` |
 | `Refused to export Colab-yoga runners` | `colab_kernel.py` 导出 runners 前发现必填四项里有空值或 `<YOUR_...>` 占位符，报错里列出了字段名；补齐后重跑 `colab_kernel.py --all` |

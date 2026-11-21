@@ -480,8 +480,42 @@ class FindColabTests(unittest.TestCase):
             self.assertEqual(run.call_args[0][0], ['C:/x/colab.exe', 'stop', '-s', 's'])
 
 
+class ColabCliVersionTests(unittest.TestCase):
+    PIN = colab_path.COLAB_CLI_VERSION
+
+    def test_install_hint_uses_the_pin(self):
+        self.assertIn('"google-colab-cli==%s"' % self.PIN, colab_path.INSTALL_HINT)
+
+    def test_versions_are_read_from_both_installs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            tool_py = root / 'tool' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python3')
+            tool_sp = root / 'tool' / ('Lib/site-packages' if os.name == 'nt' else 'lib/python3.12/site-packages')
+            (tool_sp / 'google_colab_cli-0.8.0.dist-info').mkdir(parents=True)
+            (root / 'yoga/site-packages/google_colab_cli-0.7.5.dist-info').mkdir(parents=True)
+            with mock.patch.object(colab_cli, 'CLI_PYTHON', tool_py), \
+                    mock.patch.object(colab_cli, 'YOGA_DIR', root / 'yoga'):
+                self.assertEqual(colab_cli.colab_cli_versions(), {'uv_tool': '0.8.0', 'colab_yoga': '0.7.5'})
+            with mock.patch.object(colab_cli, 'CLI_PYTHON', root / 'none/bin/python3'), \
+                    mock.patch.object(colab_cli, 'YOGA_DIR', root / 'none'):
+                self.assertEqual(colab_cli.colab_cli_versions(), {'uv_tool': None, 'colab_yoga': None})
+
+    def test_matching_installs_warn_nothing(self):
+        self.assertEqual(colab_cli.colab_cli_version_warnings({'uv_tool': self.PIN, 'colab_yoga': self.PIN}), [])
+        self.assertEqual(colab_cli.colab_cli_version_warnings({'uv_tool': self.PIN, 'colab_yoga': None}), [])
+        self.assertEqual(colab_cli.colab_cli_version_warnings({'uv_tool': None, 'colab_yoga': '0.7.5'}), [])
+
+    def test_an_old_uv_tool_gets_the_upgrade_command(self):
+        (warning,) = colab_cli.colab_cli_version_warnings({'uv_tool': '0.7.5', 'colab_yoga': None})
+        self.assertIn('--force "google-colab-cli==%s"' % self.PIN, warning)
+
+    def test_colab_yoga_on_another_release_is_named(self):
+        (warning,) = colab_cli.colab_cli_version_warnings({'uv_tool': self.PIN, 'colab_yoga': '0.7.5'})
+        self.assertIn('Colab-yoga bundles colab-cli 0.7.5', warning)
+
+
 class PreflightTests(unittest.TestCase):
-    CONFIG = {'ts_client_id': 'the-id', 'ts_client_secret': 'the-secret', 'tailnet_fqdn': 'q.ts.net', 'api_key': 'k'}
+    CONFIG ={'ts_client_id': 'the-id', 'ts_client_secret': 'the-secret', 'tailnet_fqdn': 'q.ts.net', 'api_key': 'k'}
 
     def _preflight(self, *, pythonw=True, ts_state='Running', ts_exe='C:/ts/tailscale.exe', oauth=(200, {'access_token': 't'}),
                    oauth_error=None, skip=False):
