@@ -6,7 +6,7 @@ task if the parent job forbids breakaway):
 
   <uv-tool>/Scripts/pythonw.exe colab_keepalive.py <session> <idle_min> [spawn]
 
-Why: google-colab-cli 0.7.5 starts no keep-alive daemon (`colab new` only
+Why: google-colab-cli (0.7.5 through 0.8.0) starts no keep-alive daemon (`colab new` only
 assigns), and a CLI runtime (T4 and G4 alike) is pruned 21-35 minutes after
 creation. What keeps it: a short kernel execution every 30 s (`colab exec`,
 the pattern Wakeloom's local mode uses). The daemon runs that execution itself
@@ -28,7 +28,7 @@ The VM often never answers that path. ReadTimeout means TFE already recorded
 LastActiveTime and is success. A real HTTP 4xx is failure; two in a row means
 the assignment is gone and this process exits. The endpoint and the runtime
 proxy token (about 1 h) are refreshed from GET /tun/m/assignments each cycle.
-OAuth access tokens are refreshed from ~/.config/colab-cli/token.json.
+OAuth access tokens are refreshed and saved to the colab CLI's OS keyring entry.
 
 Idle stop (default 45 min) uses llama-server /slots: is_processing, a move in
 n_past/n_decoded, or an explicit last-request timestamp if the build has one.
@@ -235,8 +235,22 @@ def _import_colab():
     return ColabRequestError, State, _apply_proxy_info, get_status_code
 
 
+def persist_creds(creds, log) -> None:
+    """Save refreshed credentials where the colab CLI reads them: its OS keyring entry
+    (Windows Credential Manager, macOS Keychain; colab-cli 0.7.6 and later), the same entry
+    Colab-yoga's bridge uses. Nothing is written to disk. A failed save is logged and the
+    daemon goes on: the refreshed credentials already work in this process, and an older
+    CLI without keyring support must not take the heartbeat down."""
+    try:
+        import keyring
+        from colab_cli.auth import KEYRING_SERVICE_NAME, KEYRING_USERNAME
+        keyring.set_password(KEYRING_SERVICE_NAME, KEYRING_USERNAME, creds.to_json())
+    except Exception as err:
+        log('oauth token refreshed but not saved (%s); colab-cli older than 0.7.6?' % type(err).__name__)
+
+
 def refresh_oauth(client, log) -> None:
-    """Refresh an expired access token and persist it next to the CLI's token.json."""
+    """Refresh an expired access token and persist it where the CLI reads it."""
     creds = getattr(client.session, 'credentials', None)
     if creds is None or not getattr(creds, 'refresh_token', None):
         return
@@ -244,10 +258,7 @@ def refresh_oauth(client, log) -> None:
         return
     from google.auth.transport.requests import Request
     creds.refresh(Request())
-    path = Path.home() / '.config/colab-cli/token.json'
-    tmp = path.with_suffix('.json.tmp')
-    tmp.write_text(creds.to_json(), encoding='utf-8', newline='\n')
-    os.replace(tmp, path)
+    persist_creds(creds, log)
     log('oauth access token refreshed')
 
 
@@ -257,10 +268,7 @@ def force_refresh_oauth(client, log) -> bool:
         return False
     from google.auth.transport.requests import Request
     creds.refresh(Request())
-    path = Path.home() / '.config/colab-cli/token.json'
-    tmp = path.with_suffix('.json.tmp')
-    tmp.write_text(creds.to_json(), encoding='utf-8', newline='\n')
-    os.replace(tmp, path)
+    persist_creds(creds, log)
     log('oauth access token force-refreshed after 401')
     return True
 

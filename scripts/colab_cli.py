@@ -13,7 +13,7 @@ launch reads that same cell from notebooks/private/<model>.ipynb, else notebooks
 the kernel with LAUNCH_DETACHED=1, and polls http://<tailnet>:443/health until 200.
 The Tailscale service is raw TCP to llama-server, so HTTPS on that name never completes.
 
-Liveness: google-colab-cli 0.7.5 does not start a keep-alive daemon; a CLI runtime is pruned
+Liveness: google-colab-cli (0.7.5 through 0.8.0) does not start a keep-alive daemon; a CLI runtime is pruned
 21-35 min after creation unless the kernel sees fresh executions. start/launch therefore start
 colab_keepalive.py outside this shell: every 30 s it runs a one-line `colab exec` (the kernel
 heartbeat that keeps the VM), every 60 s it also GETs /tun/m/<endpoint>/keep-alive/, and it runs
@@ -42,7 +42,7 @@ already uses start_new_session=True.
 Colab Secrets and drive.mount() do not work in CLI sessions; the kernel downloads from pinned Hugging Face
 revisions and reads HF_TOKEN from the environment first, so a local HF_TOKEN is forwarded when present.
 The colab CLI must be authorized once, by a person at a terminal: `colab sessions` prints the OAuth URL and
-waits on input() for the pasted code (token in ~/.config/colab-cli/token.json). Every colab call here runs
+waits on input() for the pasted code (the token goes to the colab CLI's OS keyring entry). Every colab call here runs
 with stdin closed, so an unauthorized CLI fails at once with a one-line "not authorized" message instead of
 hanging. Its DEBUG log ~/.config/colab-cli/colab.log records executed code,
 which includes the same credentials the generated notebooks already carry.
@@ -66,7 +66,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from colab_path import INSTALL_HINT, find_colab  # noqa: E402
+from colab_path import COLAB_CLI_VERSION, INSTALL_HINT, find_colab  # noqa: E402
 from stdio_utf8 import force_utf8  # noqa: E402
 
 # `status` and `stop` are the commands run most often and need none of these: requests alone is ~170 ms of
@@ -537,6 +537,37 @@ def _tailscale_oauth_problem(config: dict) -> str | None:
             'and that the client may write Auth Keys for tag:colab' % r.status_code)
 
 
+def _installed_colab_cli(site_packages: list) -> str | None:
+    """The google-colab-cli version installed in the first of these site-packages that has one, else None."""
+    for sp in site_packages:
+        for info in sorted(Path(sp).glob('google_colab_cli-*.dist-info')):
+            return info.name[len('google_colab_cli-'):-len('.dist-info')]
+    return None
+
+
+def colab_cli_versions() -> dict:
+    """google-colab-cli as installed for this repository (the uv tool) and inside Colab-yoga (None: not found)."""
+    venv = CLI_PYTHON.parent.parent
+    tool = [venv / 'Lib/site-packages'] if os.name == 'nt' else sorted(venv.glob('lib/python3*/site-packages'))
+    return {'uv_tool': _installed_colab_cli(tool), 'colab_yoga': _installed_colab_cli([YOGA_DIR / 'site-packages'])}
+
+
+def colab_cli_version_warnings(versions: dict | None = None) -> list[str]:
+    """Version skew that does not stop a start but breaks sign-in later: colab-cli 0.7.6 moved the shared OAuth
+    token from ~/.config/colab-cli/token.json into the OS keyring, and the first newer process to run deletes the
+    file, so an older install beside a newer one finds no token."""
+    v = colab_cli_versions() if versions is None else versions
+    warnings = []
+    if v['uv_tool'] and v['uv_tool'] != COLAB_CLI_VERSION:
+        warnings.append('colab CLI %s is installed, this repository is tested with %s: python -m uv tool install '
+                        '--force "google-colab-cli==%s"' % (v['uv_tool'], COLAB_CLI_VERSION, COLAB_CLI_VERSION))
+    if v['uv_tool'] and v['colab_yoga'] and v['colab_yoga'] != v['uv_tool']:
+        warnings.append('Colab-yoga bundles colab-cli %s but the uv tool is %s: they share one OAuth token, so update '
+                        'the older one (Colab-yoga: install a release built for %s)' % (v['colab_yoga'], v['uv_tool'],
+                                                                                         COLAB_CLI_VERSION))
+    return warnings
+
+
 def preflight(config: dict, skip: bool = False) -> None:
     """Local checks that otherwise show up only after the G4 is billing. Raises SystemExit before anything is allocated."""
     if skip:
@@ -550,6 +581,8 @@ def preflight(config: dict, skip: bool = False) -> None:
         problem = check()
         if problem:
             problems.append(problem)
+    for warning in colab_cli_version_warnings():
+        print('[colab_cli] warning: %s' % warning, flush=True)
     if problems:
         raise SystemExit('preflight failed, nothing was allocated:\n  - %s\n(--skip-preflight overrides these checks)'
                          % '\n  - '.join(problems))
@@ -967,7 +1000,7 @@ def cmd_stop(names: list[str]):
     live, scheduled, state_sessions = [], [], []
     if stop_all:
         # `schtasks /Query` (slow) and `colab sessions` do not depend on each other. Only a non-colab command
-        # overlaps: two colab processes at once could race on token.json, which the CLI rewrites in place.
+        # overlaps: two colab processes at once could race on the saved OAuth token, which the CLI rewrites on refresh.
         scheduled_text = _in_background(_schtasks_query_text)
         live = sessions()
         scheduled = keepalive_sessions_in_schtasks_query(scheduled_text())

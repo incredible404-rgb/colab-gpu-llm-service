@@ -49,6 +49,64 @@ class PingClassifyTests(unittest.TestCase):
             'https://colab.research.google.com/tun/m/gpu-g4-s-example/keep-alive/')
 
 
+class OAuthPersistTests(unittest.TestCase):
+    """A refreshed token goes to the colab CLI's keyring entry (colab-cli >= 0.7.6), never to token.json."""
+
+    def setUp(self):
+        self.saved = {}
+        fake_keyring = types.SimpleNamespace(set_password=lambda *a: self.saved.__setitem__(a[:2], a[2]))
+        fake_auth = types.SimpleNamespace(KEYRING_SERVICE_NAME='google-colab-cli', KEYRING_USERNAME='oauth_token')
+        # CI has no google-auth; the daemon only needs Request from it here.
+        fake_requests = types.SimpleNamespace(Request=mock.Mock())
+        google = types.ModuleType('google')
+        google.auth = types.ModuleType('google.auth')
+        google.auth.transport = types.ModuleType('google.auth.transport')
+        google.auth.transport.requests = fake_requests
+        patcher = mock.patch.dict(sys.modules, {
+            'keyring': fake_keyring, 'colab_cli.auth': fake_auth, 'google': google, 'google.auth': google.auth,
+            'google.auth.transport': google.auth.transport, 'google.auth.transport.requests': fake_requests})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        self.home = Path(home.name)
+        home_patch = mock.patch.object(Path, 'home', return_value=self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+
+    def _client(self, expired=True):
+        creds = mock.Mock(refresh_token='r', expired=expired)
+        creds.to_json.return_value = '{"token": "fresh"}'
+        return types.SimpleNamespace(session=types.SimpleNamespace(credentials=creds)), creds
+
+    def test_refresh_saves_to_the_cli_keyring_entry_only(self):
+        client, creds = self._client()
+        ka.refresh_oauth(client, lambda msg: None)
+        creds.refresh.assert_called_once()
+        self.assertEqual(self.saved, {('google-colab-cli', 'oauth_token'): '{"token": "fresh"}'})
+        self.assertFalse((self.home / '.config/colab-cli/token.json').exists())
+
+    def test_unexpired_token_is_left_alone(self):
+        client, creds = self._client(expired=False)
+        ka.refresh_oauth(client, lambda msg: None)
+        creds.refresh.assert_not_called()
+        self.assertEqual(self.saved, {})
+
+    def test_a_failed_save_is_logged_and_the_daemon_goes_on(self):
+        client, creds = self._client(expired=False)
+        logs = []
+        with mock.patch.dict(sys.modules, {'colab_cli.auth': types.SimpleNamespace()}):  # 0.7.5: no KEYRING_*
+            self.assertTrue(ka.force_refresh_oauth(client, logs.append))
+        creds.refresh.assert_called_once()
+        self.assertTrue(any('not saved' in line for line in logs), logs)
+        self.assertEqual(self.saved, {})
+
+    def test_force_refresh_after_401_saves_too(self):
+        client, _ = self._client(expired=False)
+        self.assertTrue(ka.force_refresh_oauth(client, lambda msg: None))
+        self.assertIn(('google-colab-cli', 'oauth_token'), self.saved)
+
+
 class IdleTests(unittest.TestCase):
     def test_first_sample_starts_the_clock(self):
         active, fp = ka.inference_active([{'is_processing': False, 'n_past': 10}], None)
