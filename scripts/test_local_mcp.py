@@ -231,5 +231,69 @@ class SharedBridgeCleanupTests(unittest.TestCase):
         start.assert_called_once_with()
 
 
+class SchtasksFallbackTests(unittest.TestCase):
+    """An agent's sandboxed shell refuses CREATE_BREAKAWAY_FROM_JOB (WinError 5): Task Scheduler starts the server."""
+
+    TOKEN = 'test-only-owned-bridge-token'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='local-mcp-schtasks-')
+        self.root = Path(self.tmp.name)
+        self.path = self.root / 'config.json'
+        self.path.write_text(json.dumps({'token': self.TOKEN, 'cwd': str(self.root)}), encoding='utf-8')
+        env = mock.patch.dict(os.environ, {'LOCAL_MCP_CONFIG': str(self.path), 'LOCAL_MCP_PORT': '34265',
+                                           'LOCAL_MCP_LOG': str(self.root / 'local-mcp.log')})
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.runs = []
+
+    def fake_probe(self, answering_after=1):
+        calls = []
+
+        def probe(token='', timeout=2.0):
+            calls.append(token)
+            if len(calls) <= answering_after:
+                return None
+            return {'server': 'local_mcp', 'pid': 4242} if token else {'server': 'local_mcp'}
+        return probe
+
+    def fake_run(self, fail_on=None):
+        def run(argv, **kwargs):
+            self.runs.append(argv[:2])
+            return mock.Mock(returncode=1 if argv[1] == fail_on else 0, stdout='refused', stderr='')
+        return run
+
+    @unittest.skipUnless(os.name == 'nt', 'the breakaway flag and schtasks are Windows-only')
+    def test_refused_breakaway_starts_through_schtasks_and_removes_the_task(self):
+        with mock.patch.object(m, 'probe', self.fake_probe()), mock.patch.object(m, '_node', return_value='node'), \
+                mock.patch.object(m, '_pi_dir'), \
+                mock.patch.object(m.subprocess, 'Popen', side_effect=PermissionError(13, 'Access is denied')), \
+                mock.patch.object(m.subprocess, 'run', self.fake_run()), mock.patch.object(m.time, 'sleep'):
+            result = m.start()
+        self.assertEqual((result['ok'], result['pid'], result['spawn']), (True, 4242, 'schtasks'))
+        self.assertEqual(self.runs, [['schtasks', '/Create'], ['schtasks', '/Run'], ['schtasks', '/Delete']])
+        spec = json.loads((self.root / 'local-mcp-spawn.json').read_text(encoding='utf-8'))
+        self.assertEqual(spec['env']['LOCAL_MCP_PORT'], '34265')
+        self.assertNotIn(self.TOKEN, json.dumps(spec))
+
+    def test_a_failed_create_is_reported_and_leaves_nothing_behind(self):
+        with mock.patch.object(m.subprocess, 'run', self.fake_run(fail_on='/Create')):
+            result = m._start_via_schtasks('node', dict(os.environ), {'token': self.TOKEN})
+        self.assertFalse(result['ok'])
+        self.assertIn('schtasks /Create failed', result['error'])
+        self.assertFalse((self.root / 'local-mcp-spawn.json').exists())
+        self.assertEqual(self.runs[-1], ['schtasks', '/Delete'])
+
+    def test_serve_runs_the_spec_with_its_environment_and_removes_it(self):
+        spec = self.root / 'local-mcp-spawn.json'
+        spec.write_text(json.dumps({
+            'argv': [sys.executable, '-c', 'import os, sys; sys.exit(int(os.environ["LOCAL_MCP_EXIT"]))'],
+            'cwd': str(self.root), 'log': str(self.root / 'serve.log'), 'env': {'LOCAL_MCP_EXIT': '5'}}),
+            encoding='utf-8')
+        self.assertEqual(m.main(['_serve', str(spec)]), 5)
+        self.assertFalse(spec.exists())
+
+
 if __name__ == '__main__':
     unittest.main()

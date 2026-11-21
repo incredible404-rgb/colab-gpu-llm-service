@@ -401,11 +401,18 @@ def _start() -> dict:
     flags = 0
     if os.name == 'nt':
         flags = (getattr(subprocess, 'DETACHED_PROCESS', 0) | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
-                 | 0x01000000)  # CREATE_BREAKAWAY_FROM_JOB: survives the launcher's job object
-    with open(log_path(), 'ab') as log:
-        proc = subprocess.Popen(
-            [node, str(SERVER)], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-            close_fds=True, creationflags=flags, start_new_session=(os.name != 'nt'))
+                 | CREATE_BREAKAWAY_FROM_JOB)  # survives the launcher's job object
+    try:
+        with open(log_path(), 'ab') as log:
+            proc = subprocess.Popen(
+                [node, str(SERVER)], env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                close_fds=True, creationflags=flags, start_new_session=(os.name != 'nt'))
+    except PermissionError:
+        # A job that forbids breakaway (an agent's sandboxed shell) refuses the flag with WinError 5.
+        # Task Scheduler starts the server outside that job, the way colab_cli.py starts its keep-alive.
+        if os.name != 'nt':
+            raise
+        return _start_via_schtasks(node, env, config)
     deadline = time.monotonic() + READY_TIMEOUT
     while time.monotonic() < deadline:
         if proc.poll() is not None:
@@ -430,6 +437,71 @@ def _start() -> dict:
     return {'ok': False, 'started': False, 'url': url(), 'token_file': str(config_path()),
             'error': 'local_mcp did not answer on port %d within %.0fs (pid %d stopped): %s'
                      % (port(), READY_TIMEOUT, proc.pid, _log_tail() or '(no log)')}
+
+
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+SCHTASKS_TASK = 'ColabLocalMcp'
+SCHTASKS_READY_TIMEOUT = 20.0  # the scheduler needs a moment before the wrapper starts Node
+
+
+def _spawn_spec_path() -> Path:
+    return config_path().parent / 'local-mcp-spawn.json'
+
+
+def _start_via_schtasks(node: str, env: dict, config: dict) -> dict:
+    """Start the server from a one-shot scheduled task. Its action is `local_mcp.py _serve <spec>`, which runs Node
+    with this call's environment and log and stays its parent, so the task never ends while the server runs.
+    The spec holds the command, the working directory and the LOCAL_MCP_* settings, never the token."""
+    keys = [k for k in env if k.startswith(('LOCAL_MCP_', 'LOCAL_TAILSCALE_')) or k in ('NODE_PATH',)]
+    spec = {'argv': [node, str(SERVER)], 'cwd': os.getcwd(), 'log': str(log_path()),
+            'env': {k: env[k] for k in keys}}
+    spec_path = _spawn_spec_path()
+    spec_path.write_text(json.dumps(spec), encoding='utf-8')
+    py = Path(sys.executable)
+    pyw = py.with_name('pythonw.exe')
+    action = subprocess.list2cmdline([str(pyw if pyw.is_file() else py), '-X', 'utf8', str(Path(__file__).resolve()),
+                                      '_serve', str(spec_path)])
+    base = {'ok': False, 'started': False, 'url': url(), 'token_file': str(config_path())}
+    try:
+        for argv in (['schtasks', '/Create', '/F', '/TN', SCHTASKS_TASK, '/SC', 'ONCE', '/ST', '23:59',
+                      '/RL', 'LIMITED', '/TR', action],
+                     ['schtasks', '/Run', '/TN', SCHTASKS_TASK]):
+            done = subprocess.run(argv, capture_output=True, text=True, encoding='utf-8', errors='replace')
+            if done.returncode != 0:
+                spec_path.unlink(missing_ok=True)
+                return {**base, 'error': 'breakaway refused and %s failed: %s'
+                                         % (' '.join(argv[:2]), ((done.stdout or '') + (done.stderr or '')).strip())}
+        # The port was free before the task ran, so the local_mcp that answers with this token is the one it started.
+        token = str(config.get('token') or '')
+        deadline = time.monotonic() + SCHTASKS_READY_TIMEOUT
+        while time.monotonic() < deadline:
+            health = probe(timeout=0.5)
+            if health is not None:
+                if health.get('server') != 'local_mcp':
+                    return {**base, 'error': 'port %d was taken by %s while local_mcp started via schtasks'
+                                             % (port(), _holder(health))}
+                running = probe(token, timeout=0.5) or {}
+                if running.get('pid'):
+                    return {'ok': True, 'started': True, 'pid': running['pid'], 'spawn': 'schtasks', 'url': url(),
+                            'token_file': str(config_path())}
+            time.sleep(0.2)
+        return {**base, 'error': 'local_mcp started via schtasks did not answer on port %d within %.0fs: %s'
+                                 % (port(), SCHTASKS_READY_TIMEOUT, _log_tail() or '(no log)')}
+    finally:
+        # /Run has detached the action; the ONCE task would otherwise stay Ready and fire again at 23:59.
+        subprocess.run(['schtasks', '/Delete', '/F', '/TN', SCHTASKS_TASK], capture_output=True)
+
+
+def serve(spec_file: str) -> int:
+    """The scheduled task's action: run Node as described by the spec and wait for it (no output, under pythonw)."""
+    path = Path(spec_file)
+    spec = json.loads(path.read_text(encoding='utf-8'))
+    path.unlink(missing_ok=True)
+    with open(spec['log'], 'ab') as log:
+        proc = subprocess.Popen(spec['argv'], env={**os.environ, **spec['env']}, cwd=spec['cwd'],
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    return proc.wait()
 
 
 def status() -> dict:
@@ -504,6 +576,8 @@ _COMMANDS = {'start': start, 'status': status, 'stop': stop}
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if len(argv) == 2 and argv[0] == '_serve':  # internal: the action of the schtasks fallback in start()
+        return serve(argv[1])
     if not argv or argv[0] in ('-h', '--help'):
         sys.stderr.write('usage: python -X utf8 scripts/local_mcp.py {start|status|stop} [--host HOST]\n')
         return 2
